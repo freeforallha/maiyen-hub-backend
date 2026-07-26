@@ -1,0 +1,42 @@
+[Unit]
+Description=MaiYen Hub Backend
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=maiyen
+WorkingDirectory=/opt/maiyen-hub-backend
+ExecStart=/usr/bin/node /opt/maiyen-hub-backend/index.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=MAIYEN_LOCAL_RUNTIME_DIR=/opt/maiyen-hub-backend/.maiyen_runtime
+Environment=MAIYEN_RUNTIME_DIR=/opt/maiyen-hub-backend/.maiyen_runtime
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ReadWritePaths=/opt/maiyen-hub-backend/.maiyen_runtime
+
+[Install]
+WantedBy=multi-user.target

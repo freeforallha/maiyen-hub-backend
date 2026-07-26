@@ -1,0 +1,23 @@
+[Unit]
+Description=Apply a signed MaiYen Hub update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=@MAIYEN_SERVICE_GROUP@
+UMask=0007
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/maiyen-updater/updater.env
+ExecStart=/usr/bin/flock -n /run/lock/maiyen-hub-update.lock /usr/bin/node /usr/local/lib/maiyen-updater/scripts/apply_hub_update.js
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+TimeoutStartSec=30min
+ProtectHome=false
+PrivateTmp=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

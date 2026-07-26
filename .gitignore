@@ -1,3 +1,11 @@
 node_modules/
 .env
+.env.*
 serviceAccount.json
+serviceAccountKey.json
+reports/
+.maiyen_runtime/
+*.zip
+*.log
+*.bak
+*.bak_*

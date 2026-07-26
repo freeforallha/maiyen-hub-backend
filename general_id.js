@@ -4,8 +4,16 @@ const path = require("path");
 const crypto = require("crypto");
 const { execFileSync, execSync } = require("child_process");
 
-const SOURCE_DIR = "/home/pi/safehome_nodejs";
-const RUNTIME_DIR = "/opt/safehome-node";
+
+const SOURCE_DIR =
+  process.env.MAIYEN_SOURCE_DIR ||
+  "/home/pi/maiyen_hub_backend";
+const RUNTIME_DIR =
+  process.env.MAIYEN_RUNTIME_DIR ||
+  "/opt/maiyen-hub-backend";
+const BACKEND_SERVICE =
+  process.env.MAIYEN_BACKEND_SERVICE ||
+  "maiyen-hub-backend.service";
 const Z2M_DIR = "/home/pi/zigbee2mqtt";
 const Z2M_DATA = path.join(Z2M_DIR, "data");
 const SERVICE_ACCOUNT = path.join(RUNTIME_DIR, "serviceAccount.json");
@@ -13,7 +21,8 @@ const Z2M_CONFIG = path.join(Z2M_DATA, "configuration.yaml");
 const Z2M_SECRET = path.join(Z2M_DATA, "secret.yaml");
 const TIMEOUT = 5000;
 
-// Khóa dẫn xuất nội bộ của SafeHome.
+// Khóa dẫn xuất nội bộ legacy của MaiYen. Giá trị vẫn mang tiền tố
+// SafeHome để mọi Hub đã triển khai tiếp tục tạo đúng token Zigbee2MQTT.
 // Token phụ thuộc vào serial riêng của từng Pi nên mỗi Hub có token khác nhau.
 // Không thay đổi giá trị này sau khi đã triển khai sản phẩm.
 const Z2M_TOKEN_DERIVATION_KEY =
@@ -460,14 +469,14 @@ function zigbeeInfo(expectedToken) {
 }
 
 function backendInfo() {
-  const service = serviceInfo("safehome-node.service");
+  const service = serviceInfo(BACKEND_SERVICE);
   const runtimeDirectory = service.working_directory || RUNTIME_DIR;
 
   return {
     service,
     node_version: process.version,
     runtime_directory: runtimeDirectory,
-    exec_start: systemctlValue("safehome-node.service", "ExecStart"),
+    exec_start: systemctlValue(BACKEND_SERVICE, "ExecStart"),
     runtime_index: statInfo(path.join(runtimeDirectory, "index.js")),
     source_git: gitInfo(),
     firebase: firebaseInfo(),
@@ -530,8 +539,10 @@ const zigbee = zigbeeInfo(expectedZigbeeToken);
 const mqtt = mqttInfo(sockets);
 const firewall = firewallInfo();
 
-if (!["safehome"].includes(backend.service.user)) {
-  warnings.push(`Backend đang chạy bằng user không chuyên biệt: ${backend.service.user || "không xác định"}`);
+if (backend.service.group !== "maiyen") {
+  warnings.push(
+    `Backend không chạy bằng group MaiYen: ${backend.service.group || "không xác định"}`,
+  );
 }
 
 if (!backend.firebase.file.exists || Number(backend.firebase.file.mode) > 640) {
@@ -618,7 +629,7 @@ const result = {
   },
 
   services: {
-    safehome_node: backend.service,
+    maiyen_hub_backend: backend.service,
     zigbee2mqtt: zigbee.service,
     mosquitto: mqtt.service,
     tailscaled: serviceInfo("tailscaled.service"),
@@ -629,7 +640,7 @@ const result = {
   mqtt,
 
   security: {
-    backend_runs_as_dedicated_user: backend.service.user === "safehome",
+    backend_runs_with_maiyen_group: backend.service.group === "maiyen",
     backend_code_owned_by_root: backend.runtime_index.owner === "root",
     backend_code_group_writable: /w/.test(backend.runtime_index.permissions?.slice(4, 7) || ""),
     service_account_secure:
@@ -642,13 +653,13 @@ const result = {
   },
 
   token_management: {
-    generation_basis: "Pi serial + SafeHome HMAC-SHA256",
+    generation_basis: "Pi serial + MaiYen legacy HMAC-SHA256",
     stored_token_matches_this_hub:
       zigbee.frontend.token_matches_this_hub,
     show_command:
-      "node /home/pi/safehome_nodejs/general_id.js --show-token",
+      `node ${SOURCE_DIR}/general_id.js --show-token`,
     sync_command:
-      "sudo node /home/pi/safehome_nodejs/general_id.js --sync-token",
+      `sudo node ${SOURCE_DIR}/general_id.js --sync-token`,
     automatic_sync_ready: true,
     token_exposed_in_report: false,
   },
@@ -663,7 +674,7 @@ const result = {
 };
 
 if (!process.argv.includes("--json")) {
-  console.log("\n🧠 SAFEHOME HUB DIAGNOSTIC REPORT\n");
+  console.log("\n🧠 MAIYEN HUB DIAGNOSTIC REPORT\n");
 }
 
 console.log(JSON.stringify(result, null, 2));

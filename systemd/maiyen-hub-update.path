@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for signed MaiYen Hub update requests
+After=local-fs.target
+
+[Path]
+PathExists=/var/lib/maiyen-updater/inbox/update-request.json
+Unit=maiyen-hub-update.service
+
+[Install]
+WantedBy=multi-user.target
