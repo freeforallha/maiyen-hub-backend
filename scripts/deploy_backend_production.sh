@@ -11,11 +11,19 @@ RUN_GROUP="$(id -gn "${RUN_USER}")"
 INSTALL_ROOT="/usr/local/lib/maiyen-updater"
 INSTALLED_CONTRACT="${INSTALL_ROOT}/hub_update_contract.js"
 INSTALLED_UPDATER="${INSTALL_ROOT}/scripts/apply_hub_update.js"
+INSTALLED_CLEANUP="${INSTALL_ROOT}/scripts/cleanup_maiyen_hub_updater.js"
 SOURCE_CONTRACT="${SOURCE_DIR}/hub_update_contract.js"
 SOURCE_UPDATER="${SOURCE_DIR}/scripts/apply_hub_update.js"
+SOURCE_CLEANUP="${SOURCE_DIR}/scripts/cleanup_maiyen_hub_updater.js"
 NEXT_UPDATER="${SOURCE_DIR}/scripts/apply_hub_update.next.js"
 SERVICE_UNIT_SOURCE="${SOURCE_DIR}/systemd/maiyen-hub-backend.service"
 SERVICE_UNIT_TARGET="/etc/systemd/system/maiyen-hub-backend.service"
+CLEANUP_SERVICE_NAME="maiyen-hub-updater-cleanup.service"
+CLEANUP_TIMER_NAME="maiyen-hub-updater-cleanup.timer"
+CLEANUP_SERVICE_SOURCE="${SOURCE_DIR}/systemd/${CLEANUP_SERVICE_NAME}"
+CLEANUP_TIMER_SOURCE="${SOURCE_DIR}/systemd/${CLEANUP_TIMER_NAME}"
+CLEANUP_SERVICE_TARGET="/etc/systemd/system/${CLEANUP_SERVICE_NAME}"
+CLEANUP_TIMER_TARGET="/etc/systemd/system/${CLEANUP_TIMER_NAME}"
 BACKUP_ROOT="${MAIYEN_DEPLOY_BACKUP_ROOT:-/var/backups/maiyen-hub/manual-deploy}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${STAMP}"
@@ -26,6 +34,8 @@ FILES=(
   "system_version.js"
   "hub_update_contract.js"
   "hub_update_bridge.js"
+  "hub_update_push.js"
+  "hub_update_push_localizations.js"
   "general_id.js"
   "package.json"
   "package-lock.json"
@@ -55,6 +65,17 @@ restore_file_if_backed_up() {
   fi
 }
 
+restore_or_remove_file() {
+  local backup_path="$1"
+  local destination="$2"
+
+  if [[ -f "${backup_path}" ]]; then
+    restore_file_if_backed_up "${backup_path}" "${destination}"
+  else
+    rm -f "${destination}"
+  fi
+}
+
 rollback_on_error() {
   local status=$?
   trap - ERR
@@ -70,6 +91,8 @@ rollback_on_error() {
     for file in "${FILES[@]}"; do
       if [[ -f "${BACKUP_DIR}/runtime/${file}" ]]; then
         cp -a "${BACKUP_DIR}/runtime/${file}" "${RUNTIME_DIR}/${file}"
+      else
+        rm -f "${RUNTIME_DIR}/${file}"
       fi
     done
 
@@ -82,6 +105,15 @@ rollback_on_error() {
     restore_file_if_backed_up \
       "${BACKUP_DIR}/updater/apply_hub_update.js" \
       "${INSTALLED_UPDATER}"
+    restore_or_remove_file \
+      "${BACKUP_DIR}/updater/cleanup_maiyen_hub_updater.js" \
+      "${INSTALLED_CLEANUP}"
+    restore_or_remove_file \
+      "${BACKUP_DIR}/systemd/${CLEANUP_SERVICE_NAME}" \
+      "${CLEANUP_SERVICE_TARGET}"
+    restore_or_remove_file \
+      "${BACKUP_DIR}/systemd/${CLEANUP_TIMER_NAME}" \
+      "${CLEANUP_TIMER_TARGET}"
 
     systemctl daemon-reload || true
     systemctl restart "${SERVICE_NAME}" || true
@@ -132,7 +164,10 @@ done
 
 for file in \
   "${SOURCE_CONTRACT}" \
+  "${SOURCE_CLEANUP}" \
   "${SERVICE_UNIT_SOURCE}" \
+  "${CLEANUP_SERVICE_SOURCE}" \
+  "${CLEANUP_TIMER_SOURCE}" \
   "${INSTALLED_CONTRACT}" \
   "${INSTALLED_UPDATER}"; do
   if [[ ! -f "${file}" ]]; then
@@ -146,16 +181,23 @@ if [[ -f "${NEXT_UPDATER}" ]]; then
   UPDATER_CANDIDATE="${NEXT_UPDATER}"
 fi
 
+if [[ ! -f "${UPDATER_CANDIDATE}" ]]; then
+  echo "Lỗi: thiếu updater candidate ${UPDATER_CANDIDATE}" >&2
+  exit 1
+fi
+
 echo "=== MAIYEN DEPLOY TARGET ==="
 echo "Source   : ${SOURCE_DIR}"
 echo "Runtime  : ${RUNTIME_DIR}"
 echo "Service  : ${SERVICE_NAME}"
 echo "Group    : ${SERVICE_GROUP}"
 echo "Updater  : ${UPDATER_CANDIDATE}"
+echo "Cleanup  : ${SOURCE_CLEANUP}"
 
 echo "=== 1/6 TEST BACKEND ==="
 runuser -u "${RUN_USER}" -- bash -lc "cd '${SOURCE_DIR}' && npm test"
 /usr/bin/node --check "${UPDATER_CANDIDATE}"
+/usr/bin/node --check "${SOURCE_CLEANUP}"
 /usr/bin/node --check "${SOURCE_CONTRACT}"
 
 echo "=== 2/6 BACKUP PRODUCTION + SYSTEM ASSETS ==="
@@ -176,6 +218,17 @@ cp -a "${INSTALLED_CONTRACT}" \
   "${BACKUP_DIR}/updater/hub_update_contract.js"
 cp -a "${INSTALLED_UPDATER}" \
   "${BACKUP_DIR}/updater/apply_hub_update.js"
+
+for optional_pair in \
+  "${INSTALLED_CLEANUP}|${BACKUP_DIR}/updater/cleanup_maiyen_hub_updater.js" \
+  "${CLEANUP_SERVICE_TARGET}|${BACKUP_DIR}/systemd/${CLEANUP_SERVICE_NAME}" \
+  "${CLEANUP_TIMER_TARGET}|${BACKUP_DIR}/systemd/${CLEANUP_TIMER_NAME}"; do
+  source_path="${optional_pair%%|*}"
+  backup_path="${optional_pair#*|}"
+  if [[ -f "${source_path}" ]]; then
+    cp -a "${source_path}" "${backup_path}"
+  fi
+done
 
 echo "Backup: ${BACKUP_DIR}"
 
@@ -199,6 +252,8 @@ done
 /usr/bin/node --check "${STAGE_DIR}/system_version.js"
 /usr/bin/node --check "${STAGE_DIR}/hub_update_contract.js"
 /usr/bin/node --check "${STAGE_DIR}/hub_update_bridge.js"
+/usr/bin/node --check "${STAGE_DIR}/hub_update_push.js"
+/usr/bin/node --check "${STAGE_DIR}/hub_update_push_localizations.js"
 /usr/bin/node --check "${STAGE_DIR}/general_id.js"
 /usr/bin/node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
   "${STAGE_DIR}/package.json"
@@ -207,11 +262,16 @@ done
 
 DEPLOY_STARTED=1
 
-echo "=== 4/6 INSTALL UPDATER + SYSTEMD UNIT ==="
+echo "=== 4/6 INSTALL UPDATER + SYSTEMD UNITS ==="
 install -D -m 0644 -o root -g root \
   "${SOURCE_CONTRACT}" \
   "${INSTALLED_CONTRACT}.new"
 mv "${INSTALLED_CONTRACT}.new" "${INSTALLED_CONTRACT}"
+
+install -D -m 0755 -o root -g root \
+  "${SOURCE_CLEANUP}" \
+  "${INSTALLED_CLEANUP}.new"
+mv "${INSTALLED_CLEANUP}.new" "${INSTALLED_CLEANUP}"
 
 install -D -m 0755 -o root -g root \
   "${UPDATER_CANDIDATE}" \
@@ -221,6 +281,12 @@ mv "${INSTALLED_UPDATER}.new" "${INSTALLED_UPDATER}"
 install -m 0644 -o root -g root \
   "${SERVICE_UNIT_SOURCE}" \
   "${SERVICE_UNIT_TARGET}"
+install -m 0644 -o root -g root \
+  "${CLEANUP_SERVICE_SOURCE}" \
+  "${CLEANUP_SERVICE_TARGET}"
+install -m 0644 -o root -g root \
+  "${CLEANUP_TIMER_SOURCE}" \
+  "${CLEANUP_TIMER_TARGET}"
 systemctl daemon-reload
 
 echo "=== 5/6 ACTIVATE + RESTART BACKEND ==="
@@ -258,12 +324,15 @@ for relative_path in "${RETIRED_SOURCE_FILES[@]}"; do
   rm -f "${SOURCE_DIR}/${relative_path}"
 done
 
-systemctl --no-pager --full status "${SERVICE_NAME}"
-journalctl -u "${SERVICE_NAME}" -n 60 --no-pager
+systemctl enable --now "${CLEANUP_TIMER_NAME}"
 
-find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d \
-  -printf '%T@ %p\n' | sort -nr | tail -n +6 | cut -d' ' -f2- | \
-  xargs -r rm -rf
+if ! /usr/bin/node "${INSTALLED_CLEANUP}"; then
+  echo "Cảnh báo: cleanup sau deploy chưa chạy thành công; timer vẫn đã được cài." >&2
+fi
+
+systemctl --no-pager --full status "${SERVICE_NAME}"
+systemctl --no-pager --full status "${CLEANUP_TIMER_NAME}"
+journalctl -u "${SERVICE_NAME}" -n 60 --no-pager
 
 DEPLOY_STARTED=0
 trap - ERR

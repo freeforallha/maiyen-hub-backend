@@ -113,6 +113,7 @@ function createHubUpdateBridge({
   currentVersions,
   getLinkedHomes,
   onStateChanged,
+  onReleaseChecked,
   publicKeyPath = DEFAULT_UPDATE_PUBLIC_KEY_PATH,
   inboxFile = DEFAULT_UPDATE_INBOX_FILE,
   resultFile = DEFAULT_UPDATE_RESULT_FILE,
@@ -283,6 +284,20 @@ function createHubUpdateBridge({
       latestReleasePublishedAt: manifest.publishedAt,
       lastUpdateError: "",
     });
+
+    if (typeof onReleaseChecked === "function") {
+      try {
+        await onReleaseChecked({
+          manifest: { ...manifest },
+          updateAvailable,
+        });
+      } catch (error) {
+        console.log(
+          "HUB UPDATE RELEASE CALLBACK ERROR:",
+          String(error?.message || error || "unknown_error"),
+        );
+      }
+    }
 
     return {
       manifest,

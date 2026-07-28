@@ -7,6 +7,9 @@ const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const {
+  cleanupUpdaterState,
+} = require("./cleanup_maiyen_hub_updater");
+const {
   DEFAULT_UPDATE_PUBLIC_KEY_PATH,
   UPDATE_PAYLOAD_ROOTS,
   isReleaseNewerThanCurrent,
@@ -544,10 +547,23 @@ function installPrivilegedUpdaterFromSource(
     resolvedSourceDir,
     "hub_update_contract.js",
   );
-  const sourceUpdater = path.join(
+  const sourceUpdaterPath = path.join(
     resolvedSourceDir,
     "scripts",
     "apply_hub_update.js",
+  );
+  const nextSourceUpdaterPath = path.join(
+    resolvedSourceDir,
+    "scripts",
+    "apply_hub_update.next.js",
+  );
+  const sourceUpdater = fs.existsSync(nextSourceUpdaterPath)
+    ? nextSourceUpdaterPath
+    : sourceUpdaterPath;
+  const sourceCleanup = path.join(
+    resolvedSourceDir,
+    "scripts",
+    "cleanup_maiyen_hub_updater.js",
   );
   const installedContract = path.join(
     resolvedInstalledRoot,
@@ -558,6 +574,11 @@ function installPrivilegedUpdaterFromSource(
     "scripts",
     "apply_hub_update.js",
   );
+  const installedCleanup = path.join(
+    resolvedInstalledRoot,
+    "scripts",
+    "cleanup_maiyen_hub_updater.js",
+  );
 
   if (!fs.existsSync(sourceContract)) {
     throw new Error("updater_contract_source_missing");
@@ -565,16 +586,22 @@ function installPrivilegedUpdaterFromSource(
   if (!fs.existsSync(sourceUpdater)) {
     throw new Error("updater_script_source_missing");
   }
+  if (!fs.existsSync(sourceCleanup)) {
+    throw new Error("updater_cleanup_source_missing");
+  }
 
   runCommand("/usr/bin/node", ["--check", sourceContract]);
+  runCommand("/usr/bin/node", ["--check", sourceCleanup]);
   runCommand("/usr/bin/node", ["--check", sourceUpdater]);
 
-  // The contract keeps backward-compatible exports, so installing it first
-  // remains safe even if the updater script replacement is interrupted.
+  // Install dependencies before the updater entrypoint so an interrupted
+  // replacement never leaves a script that requires a missing module.
   installFileAtomically(sourceContract, installedContract, 0o644);
+  installFileAtomically(sourceCleanup, installedCleanup, 0o755);
   installFileAtomically(sourceUpdater, installedUpdater, 0o755);
 
   return {
+    installedCleanup,
     installedContract,
     installedUpdater,
   };
@@ -659,22 +686,6 @@ function restoreSourceBackup(sourceDir, archivePath) {
   }
 }
 
-function rotateBackups(backupRoot, keepCount = 5) {
-  if (!fs.existsSync(backupRoot)) return;
-  const directories = fs
-    .readdirSync(backupRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => {
-      const fullPath = path.join(backupRoot, entry.name);
-      return { fullPath, mtimeMs: fs.statSync(fullPath).mtimeMs };
-    })
-    .sort((left, right) => right.mtimeMs - left.mtimeMs);
-
-  for (const item of directories.slice(keepCount)) {
-    fs.rmSync(item.fullPath, { recursive: true, force: true });
-  }
-}
-
 function archiveRequest(requestFile, archiveRoot, releaseId, status) {
   if (!fs.existsSync(requestFile)) return;
   fs.mkdirSync(archiveRoot, { recursive: true, mode: 0o770 });
@@ -684,6 +695,27 @@ function archiveRequest(requestFile, archiveRoot, releaseId, status) {
     `${stamp}-${safeIdentifier(releaseId)}-${safeIdentifier(status)}.json`,
   );
   fs.renameSync(requestFile, destination);
+}
+
+function runUpdaterCleanupBestEffort(options) {
+  try {
+    const result = cleanupUpdaterState({
+      archiveRoot: options.archiveRoot,
+      backupRoot: options.backupRoot,
+      requestFile: options.requestFile,
+      resultFile: options.resultFile,
+      workRoot: options.workRoot,
+    });
+    console.log(
+      `MaiYen updater cleanup: removed=${result.removedCount} ` +
+        `archived=${result.archivedCount}`,
+    );
+  } catch (error) {
+    console.error(
+      "MaiYen updater cleanup warning:",
+      String(error?.message || error || "unknown_error"),
+    );
+  }
 }
 
 function assertRoot() {
@@ -906,8 +938,8 @@ async function applyHubUpdate(options) {
 
     atomicWriteJson(options.resultFile, successResult);
     archiveRequest(options.requestFile, options.archiveRoot, releaseId, "success");
-    rotateBackups(options.backupRoot, 5);
     fs.rmSync(workDir, { recursive: true, force: true });
+    runUpdaterCleanupBestEffort(options);
     return successResult;
   } catch (error) {
     const errorMessage = String(error?.message || error || "unknown_error");
@@ -963,6 +995,7 @@ async function applyHubUpdate(options) {
     }
 
     fs.rmSync(workDir, { recursive: true, force: true });
+    runUpdaterCleanupBestEffort(options);
     throw error;
   }
 }
@@ -1001,6 +1034,7 @@ module.exports = {
   stableDependencySnapshot,
   installFileAtomically,
   installPrivilegedUpdaterFromSource,
+  runUpdaterCleanupBestEffort,
   validateDownloadUrl,
   validateEnvelope,
   validateZipEntries,

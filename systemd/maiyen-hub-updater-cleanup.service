@@ -1,0 +1,35 @@
+[Unit]
+Description=Clean MaiYen Hub updater state and backups
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/maiyen-updater/updater.env
+ExecStart=/usr/bin/flock -n -E 75 /run/lock/maiyen-hub-update.lock /usr/bin/node /usr/local/lib/maiyen-updater/scripts/cleanup_maiyen_hub_updater.js
+SuccessExitStatus=75
+Nice=15
+IOSchedulingClass=idle
+UMask=0007
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/run/lock /var/lib/maiyen-updater /var/backups/maiyen-hub

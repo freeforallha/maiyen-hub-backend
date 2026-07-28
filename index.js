@@ -18,6 +18,9 @@ const {
 const {
   createHubUpdateBridge,
 } = require("./hub_update_bridge");
+const {
+  createHubUpdatePushCoordinator,
+} = require("./hub_update_push");
 
 const lastNotificationMap = {};
 const lastScheduleAlarmMap = {};
@@ -162,6 +165,7 @@ const ALARM_STAGE_MAX_RETRY_COUNT = 4;
 const HUB_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 const HUB_HEARTBEAT_STARTED_AT = Date.now();
 let hubUpdateBridge = null;
+let hubUpdatePushCoordinator = null;
 
 function getHubUpdateHeartbeatFields() {
   if (!hubUpdateBridge) {
@@ -16888,6 +16892,17 @@ async function init() {
   }
 
   try {
+    hubUpdatePushCoordinator =
+      createHubUpdatePushCoordinator({
+        db,
+        deviceId: DEVICE_ID,
+        getLinkedHomes: getHomesLinkedToThisHub,
+        getReceiverUids: getAlarmReceiverUidsForHome,
+        getHomeData: getCachedHomeData,
+        getLanguageCode: getUserLanguageCode,
+        sendPushToUser,
+      });
+
     hubUpdateBridge = createHubUpdateBridge({
       db,
       deviceId: DEVICE_ID,
@@ -16895,6 +16910,10 @@ async function init() {
       getLinkedHomes: getHomesLinkedToThisHub,
       onStateChanged: () => {
         void writeHubHeartbeat();
+      },
+      onReleaseChecked: (releaseState) => {
+        return hubUpdatePushCoordinator
+          .handleReleaseCheck(releaseState);
       },
     });
     hubUpdateBridge.start();

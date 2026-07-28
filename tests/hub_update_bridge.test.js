@@ -3,14 +3,19 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
+const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
 const {
   atomicWriteJson,
   buildUpdateRequestEnvelope,
+  createHubUpdateBridge,
   normalizeHomeUpdateRequest,
   readJsonIfExists,
 } = require("../hub_update_bridge");
+const {
+  canonicalizeReleaseManifest,
+} = require("../hub_update_contract");
 
 function manifest() {
   return {
@@ -87,4 +92,103 @@ test("bridge writes request/result JSON atomically", () => {
     ["request.json"],
   );
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+
+test("bridge reports every verified release check to the optional callback", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "maiyen-bridge-release-"),
+  );
+  const publicKeyPath = path.join(tempDir, "public.pem");
+  const inboxFile = path.join(tempDir, "inbox", "request.json");
+  const resultFile = path.join(tempDir, "outbox", "result.json");
+  const releaseManifest = manifest();
+
+  const {
+    privateKey,
+    publicKey,
+  } = crypto.generateKeyPairSync("ed25519");
+
+  fs.writeFileSync(
+    publicKeyPath,
+    publicKey.export({
+      type: "spki",
+      format: "pem",
+    }),
+  );
+
+  const signature = crypto.sign(
+    null,
+    Buffer.from(
+      canonicalizeReleaseManifest(releaseManifest),
+      "utf8",
+    ),
+    privateKey,
+  ).toString("base64");
+
+  const values = new Map([
+    [
+      "system/hubReleases/latest",
+      {
+        manifest: releaseManifest,
+        signature,
+      },
+    ],
+  ]);
+
+  const db = {
+    ref(refPath) {
+      return {
+        async once() {
+          return {
+            val() {
+              return values.get(refPath) ?? null;
+            },
+          };
+        },
+        async set(value) {
+          values.set(refPath, value);
+        },
+        async update(patch) {
+          values.set(refPath, {
+            ...(values.get(refPath) || {}),
+            ...patch,
+          });
+        },
+      };
+    },
+  };
+
+  const checks = [];
+
+  const bridge = createHubUpdateBridge({
+    db,
+    deviceId: "dev_1234",
+    currentVersions: {
+      backendVersion: "1.2.0",
+      hubFirmwareVersion: "1.1.0",
+      protocolVersion: "1.0.0",
+    },
+    getLinkedHomes: async () => [],
+    onReleaseChecked: async (value) => {
+      checks.push(value);
+    },
+    publicKeyPath,
+    inboxFile,
+    resultFile,
+  });
+
+  await bridge.poll();
+
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].updateAvailable, true);
+  assert.equal(
+    checks[0].manifest.releaseId,
+    releaseManifest.releaseId,
+  );
+
+  fs.rmSync(tempDir, {
+    recursive: true,
+    force: true,
+  });
 });
