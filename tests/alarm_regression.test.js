@@ -83,6 +83,17 @@ const ALARM_INCIDENT_LIFECYCLE_SOURCE = fs.readFileSync(
   ALARM_INCIDENT_LIFECYCLE_PATH,
   "utf8",
 );
+const ALARM_INCIDENT_PERSISTENCE_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "alarm",
+  "alarm_incident_persistence.js",
+);
+const ALARM_INCIDENT_PERSISTENCE_SOURCE = fs.readFileSync(
+  ALARM_INCIDENT_PERSISTENCE_PATH,
+  "utf8",
+);
 
 function findDeclarationStart(source, pattern, label) {
   const match = pattern.exec(source);
@@ -211,6 +222,14 @@ function extractAlarmIncidentLifecycleFunctionSource(name) {
     ALARM_INCIDENT_LIFECYCLE_SOURCE,
     name,
     "domains/alarm/alarm_incident_lifecycle.js",
+  );
+}
+
+function extractAlarmIncidentPersistenceFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    ALARM_INCIDENT_PERSISTENCE_SOURCE,
+    name,
+    "domains/alarm/alarm_incident_persistence.js",
   );
 }
 
@@ -1030,7 +1049,9 @@ test("thiết bị Nguy hiểm không thể bị tắt tham gia Alarm bằng ala
 
 test("lịch bắt đầu với sensor đã không an toàn buộc gửi lần đầu và fullscreen", () => {
   const schedulerSource = extractFunctionSource("checkScheduledAlarms");
-  const incidentSource = extractFunctionSource("startOrMergeAlarmIncidents");
+  const incidentSource = extractAlarmIncidentPersistenceFunctionSource(
+    "startOrMergeAlarmIncidents",
+  );
   const initSource = extractFunctionSource("init");
 
   assert.match(
@@ -1909,7 +1930,7 @@ test("chuyển normal sang armed tái kích hoạt trạng thái nguy hiểm đa
   const transitionSource = extractFunctionSource(
     "triggerAlarmForUnsafeStateOnArmed",
   );
-  const startSource = extractFunctionSource(
+  const startSource = extractAlarmIncidentPersistenceFunctionSource(
     "startOrMergeAlarmIncidents",
   );
 

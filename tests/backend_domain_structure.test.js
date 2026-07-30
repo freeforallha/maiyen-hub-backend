@@ -27,6 +27,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(source, /domains\/alarm\/alarm_incident/);
   assert.match(source, /createAlarmIncidentLifecycle/);
   assert.match(source, /domains\/alarm\/alarm_incident_lifecycle/);
+  assert.match(source, /createAlarmIncidentPersistence/);
+  assert.match(source, /domains\/alarm\/alarm_incident_persistence/);
   assert.match(source, /createPhysicalSirenDomain/);
   assert.match(source, /domains\/alarm\/physical_siren/);
   assert.match(source, /createSensorAlarmEngine/);
@@ -78,6 +80,9 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.doesNotMatch(source, /function scheduleAlarmIncidentStages\(/);
   assert.doesNotMatch(source, /function withAlarmIncidentStartLock\(/);
   assert.doesNotMatch(source, /function buildMaiYenAlarmApnsConfig\(/);
+  assert.doesNotMatch(source, /const groups = new Map\(\);/);
+  assert.doesNotMatch(source, /forcedRedeliveryItems/);
+  assert.doesNotMatch(source, /OLD ALARM INCIDENT SUPERSEDED/);
   assert.match(
     source,
     /function asObject\(value\) \{[\s\S]*?!Array\.isArray\(value\)[\s\S]*?: \{\};[\s\S]*?\}/,
@@ -128,6 +133,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(
     deploySource,
     /domains\/alarm\/alarm_incident_lifecycle\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/alarm\/alarm_incident_persistence\.js/,
   );
   assert.match(
     deploySource,
