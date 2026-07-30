@@ -45,6 +45,7 @@ FILES=(
   "domains/auto_away/auto_away.js"
   "domains/runtime/local_runtime.js"
   "domains/devices/device_profile.js"
+  "domains/alarm/alarm_schedule.js"
   "general_id.js"
   "package.json"
   "package-lock.json"
@@ -281,6 +282,7 @@ done
 /usr/bin/node --check "${STAGE_DIR}/domains/auto_away/auto_away.js"
 /usr/bin/node --check "${STAGE_DIR}/domains/runtime/local_runtime.js"
 /usr/bin/node --check "${STAGE_DIR}/domains/devices/device_profile.js"
+/usr/bin/node --check "${STAGE_DIR}/domains/alarm/alarm_schedule.js"
 /usr/bin/node --check "${STAGE_DIR}/general_id.js"
 /usr/bin/node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
   "${STAGE_DIR}/package.json"

@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, health, Auto Away, runtime and device domains", () => {
+test("composition root uses extracted Hub, health, Auto Away, runtime, device and Alarm schedule domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -22,6 +22,7 @@ test("composition root uses extracted Hub, health, Auto Away, runtime and device
   assert.match(source, /createAutoAwayDomain/);
   assert.match(source, /createLocalRuntimeDomain/);
   assert.match(source, /domains\/devices\/device_profile/);
+  assert.match(source, /domains\/alarm\/alarm_schedule/);
   assert.match(
     source,
     /const crypto = require\(["']crypto["']\);/,
@@ -43,6 +44,13 @@ test("composition root uses extracted Hub, health, Auto Away, runtime and device
   assert.doesNotMatch(source, /function inferDeviceTypeFromPayload\(/);
   assert.doesNotMatch(source, /function getDeviceTypeFromModel\(/);
   assert.doesNotMatch(source, /function isActiveSignal\(/);
+  assert.doesNotMatch(source, /function normalizeAlarmDays\(/);
+  assert.doesNotMatch(
+    source,
+    /function normalizeDeviceAlarmScheduleCollection\(/,
+  );
+  assert.doesNotMatch(source, /function resolveActiveDeviceSchedule\(/);
+  assert.doesNotMatch(source, /function isScheduledAlarmSource\(/);
   assert.match(
     source,
     /function asObject\(value\) \{[\s\S]*?!Array\.isArray\(value\)[\s\S]*?: \{\};[\s\S]*?\}/,
@@ -67,6 +75,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime and device
   assert.match(
     deploySource,
     /domains\/devices\/device_profile\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/alarm\/alarm_schedule\.js/,
   );
 });
 

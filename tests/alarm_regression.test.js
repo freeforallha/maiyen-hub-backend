@@ -8,6 +8,9 @@ const vm = require("node:vm");
 const {
   createSystemHealthDomain,
 } = require("../domains/system_health/system_health");
+const alarmSchedule = require(
+  "../domains/alarm/alarm_schedule",
+);
 
 const INDEX_PATH = path.resolve(__dirname, "..", "index.js");
 const AUTO_AWAY_PATH = path.resolve(
@@ -28,6 +31,17 @@ const INDEX_SOURCE = fs.readFileSync(INDEX_PATH, "utf8");
 const AUTO_AWAY_SOURCE = fs.readFileSync(AUTO_AWAY_PATH, "utf8");
 const DEVICE_PROFILE_SOURCE = fs.readFileSync(
   DEVICE_PROFILE_PATH,
+  "utf8",
+);
+const ALARM_SCHEDULE_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "alarm",
+  "alarm_schedule.js",
+);
+const ALARM_SCHEDULE_SOURCE = fs.readFileSync(
+  ALARM_SCHEDULE_PATH,
   "utf8",
 );
 
@@ -230,6 +244,49 @@ function createAlarmRuntime(initialNow) {
     }
   }
 
+  const getControlledNow = () => new Date(clock.now);
+  const scheduleRuntime = {
+    ...alarmSchedule,
+    isNowInRange(startTime, endTime) {
+      return alarmSchedule.isNowInRange(
+        startTime,
+        endTime,
+        getControlledNow(),
+      );
+    },
+    getCurrentAlarmWeekdayForSchedule(startTime, endTime) {
+      return alarmSchedule.getCurrentAlarmWeekdayForSchedule(
+        startTime,
+        endTime,
+        getControlledNow(),
+      );
+    },
+    isAlarmAllowedToday(alarm) {
+      return alarmSchedule.isAlarmAllowedToday(
+        alarm,
+        getControlledNow(),
+      );
+    },
+    getActiveScheduleOccurrenceIdentity(alarm) {
+      return alarmSchedule.getActiveScheduleOccurrenceIdentity(
+        alarm,
+        getControlledNow(),
+      );
+    },
+    isDeviceAlarmScheduleActive(alarm) {
+      return alarmSchedule.isDeviceAlarmScheduleActive(
+        alarm,
+        getControlledNow(),
+      );
+    },
+    resolveActiveDeviceSchedule(configuration) {
+      return alarmSchedule.resolveActiveDeviceSchedule(
+        configuration,
+        getControlledNow(),
+      );
+    },
+  };
+
   const context = vm.createContext({
     console: {
       log() {},
@@ -246,6 +303,7 @@ function createAlarmRuntime(initialNow) {
     Math,
     JSON,
     Set,
+    ...scheduleRuntime,
   });
 
   const constNames = [
@@ -255,7 +313,6 @@ function createAlarmRuntime(initialNow) {
     "SENSOR_ALARM_DEBOUNCE_MAX_AGE_MS",
     "SENSOR_ALARM_DEBOUNCE_MAX_ENTRIES",
     "VIBRATION_ACTIVE_WINDOW_MS",
-    "DEVICE_ALARM_POLICY_DEFAULTS",
     "SENSOR_EVENT_CATEGORY",
     "SENSOR_EVENT_SEVERITY",
   ];
@@ -267,7 +324,7 @@ function createAlarmRuntime(initialNow) {
     "isGlassBreakAction",
   ];
 
-  const functionNames = [
+  const scheduleFunctionNames = [
     "toMin",
     "isNowInRange",
     "isValidHHMM",
@@ -280,17 +337,22 @@ function createAlarmRuntime(initialNow) {
     "alarmInstanceOverlapsPause",
     "normalizeDeviceAlarmScheduleEntry",
     "normalizeDeviceAlarmScheduleCollection",
+    "normalizeSecurityModeRepeatMinutes",
+    "getActiveScheduleOccurrenceIdentity",
+    "isDeviceAlarmScheduleActive",
+    "getDeviceAlarmScheduleRuntimeIdentity",
+    "resolveActiveDeviceSchedule",
+    "isScheduledAlarmSource",
+  ];
+
+  const functionNames = [
     "normalizeDeviceAlarmPolicy",
     "isSecurityDeviceType",
     "getCurrentEmergencyReason",
-    "normalizeSecurityModeRepeatMinutes",
     "normalizeHomeSecurityMode",
     "resolveAlarmActivationPriority",
     "buildAlarmTriggerFromSensorEvent",
     "resolveDeviceAlarmConfigurationForReceiver",
-    "isDeviceAlarmScheduleActive",
-    "getDeviceAlarmScheduleRuntimeIdentity",
-    "resolveActiveDeviceSchedule",
     "getSensorAlarmEventCode",
     "getSensorAlarmDebounceMs",
     "cleanupSensorAlarmDebounceMap",
@@ -312,6 +374,7 @@ function createAlarmRuntime(initialNow) {
     ...functionNames.map(extractFunctionSource),
     `this.__alarm = {
       ${deviceProfileFunctionNames.join(",\n      ")},
+      ${scheduleFunctionNames.join(",\n      ")},
       ${functionNames.join(",\n      ")},
       DEVICE_ALARM_POLICY_DEFAULTS,
       OFFLINE_TRANSIENT_ALARM_TTL_MS,
@@ -1139,9 +1202,15 @@ test("mã sự kiện phân biệt mở cửa, tháo thiết bị và khẩn c�
 });
 
 test("owned-home signature bỏ qua alarm cấp nhà nhưng vẫn theo dõi lịch thiết bị", () => {
-  const context = vm.createContext({ JSON, Number, Object, String });
+  const context = vm.createContext({
+    JSON,
+    Number,
+    Object,
+    String,
+    normalizeSecurityModeRepeatMinutes:
+      alarmSchedule.normalizeSecurityModeRepeatMinutes,
+  });
   const setupSource = [
-    extractFunctionSource("normalizeSecurityModeRepeatMinutes"),
     extractFunctionSource("normalizeHomeSecurityMode"),
     extractFunctionSource("getOwnedHomeAlarmControlSignature"),
     "this.__getOwnedHomeAlarmControlSignature = getOwnedHomeAlarmControlSignature;",
@@ -1302,9 +1371,7 @@ test("receiver Alarm signature bỏ qua mode và alarmMode", () => {
 });
 
 test("Alarm Engine không còn đọc device.alarm như lịch legacy", () => {
-  const collectionSource = extractFunctionSource(
-    "normalizeDeviceAlarmScheduleCollection",
-  );
+  const collectionSource = ALARM_SCHEDULE_SOURCE;
   const resolveSource = extractFunctionSource(
     "resolveDeviceAlarmConfigurationForReceiver",
   );
@@ -2000,10 +2067,10 @@ test("notification báo lại chỉ giữ điều kiện vẫn còn nguy hiểm"
     Set,
     JSON,
     Math,
+    normalizeRepeatMinutes: alarmSchedule.normalizeRepeatMinutes,
   });
 
   const source = [
-    extractFunctionSource("normalizeRepeatMinutes"),
     extractFunctionSource("getAlarmIncidentItemIdentity"),
     extractFunctionSource("normalizeAlarmIncidentItems"),
     extractFunctionSource("getSecurityAlarmSourcePriority"),
