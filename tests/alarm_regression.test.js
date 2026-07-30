@@ -72,6 +72,17 @@ const PHYSICAL_SIREN_SOURCE = fs.readFileSync(
   PHYSICAL_SIREN_PATH,
   "utf8",
 );
+const ALARM_INCIDENT_LIFECYCLE_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "alarm",
+  "alarm_incident_lifecycle.js",
+);
+const ALARM_INCIDENT_LIFECYCLE_SOURCE = fs.readFileSync(
+  ALARM_INCIDENT_LIFECYCLE_PATH,
+  "utf8",
+);
 
 function findDeclarationStart(source, pattern, label) {
   const match = pattern.exec(source);
@@ -192,6 +203,14 @@ function extractPhysicalSirenFunctionSource(name) {
     PHYSICAL_SIREN_SOURCE,
     name,
     "domains/alarm/physical_siren.js",
+  );
+}
+
+function extractAlarmIncidentLifecycleFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    ALARM_INCIDENT_LIFECYCLE_SOURCE,
+    name,
+    "domains/alarm/alarm_incident_lifecycle.js",
   );
 }
 
@@ -1035,7 +1054,7 @@ test("Mode Không bảo vệ im lặng hoàn toàn và chặn Emergency ở đi�
     "processSensorEventThroughAlarmEngine",
   );
   const sendSource = extractFunctionSource("sendAlarmStageSummary");
-  const advanceSource = extractFunctionSource(
+  const advanceSource = extractAlarmIncidentLifecycleFunctionSource(
     "advanceAlarmIncidentToStage",
   );
 

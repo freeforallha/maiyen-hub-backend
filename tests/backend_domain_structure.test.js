@@ -25,11 +25,13 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(source, /domains\/alarm\/alarm_schedule/);
   assert.match(source, /createAlarmIncidentDomain/);
   assert.match(source, /domains\/alarm\/alarm_incident/);
+  assert.match(source, /createAlarmIncidentLifecycle/);
+  assert.match(source, /domains\/alarm\/alarm_incident_lifecycle/);
   assert.match(source, /createPhysicalSirenDomain/);
   assert.match(source, /domains\/alarm\/physical_siren/);
   assert.match(source, /createSensorAlarmEngine/);
   assert.match(source, /domains\/alarm\/sensor_alarm_engine/);
-  assert.match(
+  assert.doesNotMatch(
     source,
     /const crypto = require\(["']crypto["']\);/,
   );
@@ -72,9 +74,27 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.doesNotMatch(source, /function resolveAlarmActivationPriority\(/);
   assert.doesNotMatch(source, /function normalizeHomeSecurityMode\(/);
   assert.doesNotMatch(source, /function shouldAcceptSensorAlarmTrigger\(/);
+  assert.doesNotMatch(source, /function advanceAlarmIncidentToStage\(/);
+  assert.doesNotMatch(source, /function scheduleAlarmIncidentStages\(/);
+  assert.doesNotMatch(source, /function withAlarmIncidentStartLock\(/);
+  assert.doesNotMatch(source, /function buildMaiYenAlarmApnsConfig\(/);
   assert.match(
     source,
     /function asObject\(value\) \{[\s\S]*?!Array\.isArray\(value\)[\s\S]*?: \{\};[\s\S]*?\}/,
+  );
+
+  const lifecycleSource = fs.readFileSync(
+    path.join(
+      ROOT,
+      "domains",
+      "alarm",
+      "alarm_incident_lifecycle.js",
+    ),
+    "utf8",
+  );
+  assert.match(
+    lifecycleSource,
+    /const crypto = require\(["']crypto["']\);/,
   );
 
   const deploySource = fs.readFileSync(
@@ -104,6 +124,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(
     deploySource,
     /domains\/alarm\/alarm_incident\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/alarm\/alarm_incident_lifecycle\.js/,
   );
   assert.match(
     deploySource,

@@ -47,14 +47,19 @@ test("runtime prefers MAIYEN environment variables with legacy fallback", () => 
 
 test("alarm helper symbols and ready log use MaiYen names", () => {
   const source = read("index.js");
+  const lifecycleSource = read(
+    "domains/alarm/alarm_incident_lifecycle.js",
+  );
 
-  assert.match(source, /function getMaiYenAndroidAlarmCollapseKey/);
-  assert.match(source, /function getMaiYenAlarmDeliveryId/);
-  assert.match(source, /function getMaiYenIosAlarmCategory/);
-  assert.match(source, /function buildMaiYenAlarmApnsConfig/);
+  assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
+  assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
+  assert.match(lifecycleSource, /function getMaiYenIosAlarmCategory/);
+  assert.match(lifecycleSource, /function buildMaiYenAlarmApnsConfig/);
   assert.match(source, /MAIYEN BACKEND READY/);
   assert.doesNotMatch(source, /function getSafeHome/);
   assert.doesNotMatch(source, /function buildSafeHome/);
+  assert.doesNotMatch(lifecycleSource, /function getSafeHome/);
+  assert.doesNotMatch(lifecycleSource, /function buildSafeHome/);
   assert.doesNotMatch(source, /SAFEHOME BACKEND READY/);
   assert.match(read("general_id.js"), /MAIYEN HUB DIAGNOSTIC REPORT/);
 });
