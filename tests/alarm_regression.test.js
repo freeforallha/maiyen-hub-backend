@@ -5,6 +5,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const {
+  createSystemHealthDomain,
+} = require("../domains/system_health/system_health");
 
 const INDEX_PATH = path.resolve(__dirname, "..", "index.js");
 const INDEX_SOURCE = fs.readFileSync(INDEX_PATH, "utf8");
@@ -1326,32 +1329,25 @@ test("Reminder chỉ dùng reminderMode rồi fallback home", () => {
 
 
 test("Reminder dùng last_seen làm nguồn chính thay vì availability offline sớm", () => {
-  const context = {
-    Date,
-    Number,
-    String,
-    Array,
-    Object,
-  };
-
-  vm.runInNewContext(
-    `const SYSTEM_HEALTH_STARTED_AT = 0;
-     const SYSTEM_HEALTH_NO_DATA_GRACE_MS = 10 * 60 * 1000;
-     function isSecurityDeviceType() { return true; }
-     function isEmergencyDeviceType() { return true; }
-     ${extractFunctionSource("getHeartbeatLimitMs")}
-     ${extractFunctionSource("parseSystemHealthTimestamp")}
-     ${extractFunctionSource("normalizeSystemHealthAvailability")}
-     ${extractFunctionSource("isSystemHealthExplicitlyOffline")}
-     ${extractFunctionSource("isSystemHealthExplicitlyOnline")}
-     ${extractFunctionSource("isProtectionRelevantDeviceType")}
-     ${extractFunctionSource("evaluateDeviceSystemHealth")}
-     this.evaluateDeviceSystemHealth = evaluateDeviceSystemHealth;`,
-    context,
-  );
-
   const now = new Date("2026-07-23T00:00:00.000Z").getTime();
-  const freshSmoke = context.evaluateDeviceSystemHealth(
+  const { evaluateDeviceSystemHealth } = createSystemHealthDomain({
+    db: {
+      ref: () => ({
+        update: async () => {},
+      }),
+    },
+    getFirebaseConnected: () => false,
+    getAccountsEntries: () => [],
+    addHomeNotificationToHomeRecipients: async () => {},
+    normalizeLockState: () => "unknown",
+    isActiveSignal: () => false,
+    isSecurityDeviceType: () => true,
+    isEmergencyDeviceType: () => true,
+    now: () => now,
+    startedAt: 0,
+  });
+
+  const freshSmoke = evaluateDeviceSystemHealth(
     "smokeA",
     {
       type: "smoke",
@@ -1367,7 +1363,7 @@ test("Reminder dùng last_seen làm nguồn chính thay vì availability offline
     false,
   );
 
-  const staleSmoke = context.evaluateDeviceSystemHealth(
+  const staleSmoke = evaluateDeviceSystemHealth(
     "smokeA",
     {
       type: "smoke",
@@ -1383,7 +1379,7 @@ test("Reminder dùng last_seen làm nguồn chính thay vì availability offline
     true,
   );
 
-  const noTimestamp = context.evaluateDeviceSystemHealth(
+  const noTimestamp = evaluateDeviceSystemHealth(
     "sosA",
     {
       type: "sos",

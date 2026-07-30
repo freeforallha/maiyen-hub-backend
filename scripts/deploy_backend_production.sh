@@ -41,6 +41,7 @@ FILES=(
   "domains/hub/hub_identity.js"
   "domains/hub/hub_heartbeat.js"
   "domains/shared/ordered_list_cleanup.js"
+  "domains/system_health/system_health.js"
   "general_id.js"
   "package.json"
   "package-lock.json"

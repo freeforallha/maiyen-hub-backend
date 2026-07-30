@@ -12,15 +12,26 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub and cleanup domains", () => {
+test("composition root uses extracted Hub, health and cleanup domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
   assert.match(source, /createHubHeartbeat/);
   assert.match(source, /createOrderedListCleanup/);
+  assert.match(source, /createSystemHealthDomain/);
   assert.doesNotMatch(source, /function readConnectedWifiInfo\(/);
   assert.doesNotMatch(source, /async function getHomesLinkedToThisHub\(/);
   assert.doesNotMatch(source, /async function trimOrderedListByTime\(/);
+  assert.doesNotMatch(source, /function evaluateHomeSystemHealth\(/);
+
+  const deploySource = fs.readFileSync(
+    path.join(ROOT, "scripts", "deploy_backend_production.sh"),
+    "utf8",
+  );
+  assert.match(
+    deploySource,
+    /domains\/system_health\/system_health\.js/,
+  );
 });
 
 test("Hub heartbeat writes only linked homes and keeps one global heartbeat", async () => {
