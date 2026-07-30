@@ -21,6 +21,17 @@ const {
 const {
   createHubUpdatePushCoordinator,
 } = require("./hub_update_push");
+const {
+  buildPresenceRecoveryMessage,
+  createPresenceRecoveryCoordinator,
+} = require("./presence_recovery");
+const {
+  buildDeviceFirebaseUpdate,
+  firebaseUpdateContainsTelemetry,
+  memberPresenceStatusSignature,
+  presenceCleanupTargetSignature,
+  updatePersistedTelemetrySnapshot,
+} = require("./firebase_write_policy");
 
 const lastNotificationMap = {};
 const lastScheduleAlarmMap = {};
@@ -70,6 +81,12 @@ const CO_VALUE_PERSIST_INTERVAL_MS = 30 * 1000;
 const CO_TELEMETRY_PERSIST_INTERVAL_MS = 60 * 1000;
 const coSensorRuntimeMap = new Map();
 const coSensorProcessingPromiseMap = new Map();
+
+// Telemetry thường chỉ được ghi tối đa mỗi 60 giây. Trạng thái an ninh,
+// khẩn cấp và actuator thay đổi vẫn được ghi ngay lập tức.
+const DEVICE_TELEMETRY_PERSIST_INTERVAL_MS = 60 * 1000;
+const devicePersistenceRuntimeMap = new Map();
+
 const vibrationStateClearTimerMap = new Map();
 const sosStateClearTimerMap = new Map();
 const emergencyStatusClearTimerMap = new Map();
@@ -205,6 +222,10 @@ const securityModeRepeatInProgress = new Set();
 // cập nhật incident. Map này chỉ tồn tại trong runtime và không thay đổi
 // trạng thái thật của cảm biến trong Firebase.
 const sensorAlarmEventDebounceMap = new Map();
+
+// Chặn ghi lặp cùng một kết quả Presence cleanup mỗi 10 giây trong lúc
+// listener Firebase chưa kịp phản ánh bản update vào account cache.
+const presenceCleanupPersistedRuntimeMap = new Map();
 // Cùng một thiết bị + cùng loại sự kiện không được tạo Alarm mới liên tục.
 // Sự kiện trạng thái (cửa mở, khóa mở, khói...) còn được khóa cho tới khi
 // cảm biến thực sự trở lại an toàn; sau đó vẫn giữ khoảng nghỉ tối thiểu 60s.
@@ -2681,6 +2702,7 @@ function startDeviceMapListener() {
 
     if (!uid || !homeId) {
       delete deviceMap[deviceId];
+      devicePersistenceRuntimeMap.delete(deviceId);
       return;
     }
 
@@ -2693,6 +2715,7 @@ function startDeviceMapListener() {
 
     if (deviceId) {
       delete deviceMap[deviceId];
+      devicePersistenceRuntimeMap.delete(deviceId);
       scheduleLocalRuntimeSnapshotSave();
     }
   };
@@ -14537,6 +14560,18 @@ const IOS_STALE_PRESENCE_MAX_AGE_MS =
 const ACCOUNT_SESSION_STALE_MS =
   12 * 60 * 1000;
 
+// Trước khi Android session bị chuyển sang unknown, backend gửi tối đa
+// hai data-only FCM high-priority để app tự khôi phục foreground task và
+// ghi heartbeat ngay. Push thành công được giữ một grace ngắn; nếu app
+// vẫn không phản hồi sau hai lần thì trạng thái mới chuyển unknown.
+const presenceRecoveryCoordinator =
+  createPresenceRecoveryCoordinator({
+    triggerAgeMs: 8 * 60 * 1000,
+    retryCooldownMs: 3 * 60 * 1000,
+    graceMs: 3 * 60 * 1000,
+    maxAttempts: 2,
+  });
+
 let autoAwayTimer = null;
 let autoAwayScanRunning = false;
 
@@ -14713,6 +14748,45 @@ function getAccountSessionStatus(account, now) {
 }
 
 
+function getPresenceRecoveryCandidate(uid, account) {
+  const value = asObject(account);
+  const activeSession = asObject(value.activeSession);
+  const installationId = String(
+    activeSession.installationId || "",
+  ).trim();
+  const sessionId = String(
+    activeSession.sessionId || "",
+  ).trim();
+
+  if (!installationId || !sessionId) {
+    return null;
+  }
+
+  const session = asObject(
+    asObject(value.sessions)[installationId],
+  );
+
+  if (
+    session.signedIn !== true ||
+    String(session.sessionId || "").trim() !== sessionId
+  ) {
+    return null;
+  }
+
+  const lastSeenAt = Math.max(
+    Number(session.lastSeenAt || 0),
+    Number(session.lastLoginAt || 0),
+  );
+
+  return {
+    uid: String(uid || "").trim(),
+    installationId,
+    platform: String(session.platform || "").trim(),
+    signedIn: true,
+    lastSeenAt,
+  };
+}
+
 function normalizePresenceMonitoringWarnings(presence) {
   const value = asObject(presence);
   const warnings = new Set();
@@ -14835,6 +14909,7 @@ function getMemberPresenceStatus(
   homeId,
   sessionStatus,
   now,
+  recoveryGraceActive = false,
 ) {
   const presence = asObject(
     accounts?.[memberUid]?.homePresence?.[homeId],
@@ -14923,8 +14998,16 @@ const staleIosPresenceAllowed =
   sessionPlatform === "ios" &&
   Number(sessionStatus?.signedInSessionCount || 0) > 0;
 
+const androidRecoveryGraceAllowed =
+  !sessionActive &&
+  !hasSignedOutMarker &&
+  recoveryGraceActive === true &&
+  Number(sessionStatus?.signedInSessionCount || 0) > 0;
+
 const sessionAllowsPresence =
-  sessionActive || staleIosPresenceAllowed;
+  sessionActive ||
+  staleIosPresenceAllowed ||
+  androidRecoveryGraceAllowed;
 
 // Session đang hoạt động luôn thắng marker signed_out cũ,
 // nhưng marker signed_out thật vẫn phải chặn trạng thái cũ.
@@ -15009,7 +15092,9 @@ const reactivatedAfterSignedOut =
       ? "signed_out"
       : staleIosPresenceAllowed
         ? "ios_background_geofence"
-        : String(sessionStatus?.reason || "").trim();
+        : androidRecoveryGraceAllowed
+          ? "android_presence_recovery"
+          : String(sessionStatus?.reason || "").trim();
 
   return {
     identityMatches,
@@ -15018,6 +15103,7 @@ const reactivatedAfterSignedOut =
     sessionActive,
     sessionAllowsPresence,
     staleIosPresenceAllowed,
+    androidRecoveryGraceAllowed,
     sessionReason,
     reactivatedAfterSignedOut,
     needsSessionCleanup:
@@ -15263,51 +15349,6 @@ function buildPresenceSummary({
   };
 }
 
-function memberPresenceStatusSignature(statusMap) {
-  const normalized = {};
-
-  for (const memberUid of Object.keys(
-    asObject(statusMap),
-  ).sort()) {
-    const value = asObject(statusMap[memberUid]);
-
-    normalized[memberUid] = {
-      online: value.online === true,
-      connected: value.connected === true,
-      autoAwayParticipant:
-        value.autoAwayParticipant === true,
-      state: String(value.state || "unknown"),
-      locationKnown: value.locationKnown === true,
-      monitoringEligible:
-        value.monitoringEligible === true,
-      monitoringAvailable:
-        value.monitoringAvailable === true,
-      monitoringWarnings: Array.isArray(
-        value.monitoringWarnings,
-      )
-        ? [...value.monitoringWarnings].sort()
-        : [],
-      monitoringWarningReason: String(
-        value.monitoringWarningReason || "",
-      ),
-      monitoringHealth: String(
-        value.monitoringHealth || "",
-      ),
-      monitoringHealthReason: String(
-        value.monitoringHealthReason || "",
-      ),
-      lastConfirmedAt: Number(
-        value.lastConfirmedAt || 0,
-      ),
-      appState: String(value.appState || ""),
-      reason: String(value.reason || ""),
-      lastSeenAt: Number(value.lastSeenAt || 0),
-    };
-  }
-
-  return JSON.stringify(normalized);
-}
-
 async function checkAutoAwayHomes(db) {
   if (autoAwayScanRunning) {
     return;
@@ -15323,15 +15364,83 @@ async function checkAutoAwayHomes(db) {
     const logs = [];
     const modeNotifications = [];
     const sessionStatusByUid = new Map();
+    const pendingPresenceCleanupRuntimeUpdates = [];
+
+    const presenceRecoveryCandidateByUid = new Map();
+    const presenceRecoveryGraceByUid = new Map();
 
     for (const [accountUid, rawAccount] of Object.entries(accounts)) {
+      const account = asObject(rawAccount);
+
       sessionStatusByUid.set(
         accountUid,
         getAccountSessionStatus(
-          asObject(rawAccount),
+          account,
           now,
         ),
       );
+
+      const candidate = getPresenceRecoveryCandidate(
+        accountUid,
+        account,
+      );
+
+      if (candidate) {
+        presenceRecoveryCandidateByUid.set(
+          accountUid,
+          candidate,
+        );
+      }
+    }
+
+    for (const [accountUid, candidate] of
+      presenceRecoveryCandidateByUid.entries()) {
+      const plan = presenceRecoveryCoordinator.evaluate(
+        candidate,
+        now,
+      );
+
+      if (plan.shouldRequest) {
+        let result = { sent: 0 };
+
+        try {
+          result = await sendPushToUser(
+            accountUid,
+            buildPresenceRecoveryMessage({
+              requestedAt: now,
+              attemptNumber: plan.attemptNumber,
+            }),
+            "PRESENCE RECOVERY",
+          );
+        } catch (error) {
+          logs.push(
+            `⚠️ PRESENCE RECOVERY PUSH ERROR: ${accountUid} ${error.message}`,
+          );
+        }
+
+        presenceRecoveryCoordinator.recordAttempt(
+          plan,
+          result,
+          now,
+        );
+
+        logs.push(
+          `📍 PRESENCE RECOVERY REQUEST: ${accountUid} attempt=${plan.attemptNumber} sent=${Number(result.sent || 0)}`,
+        );
+      }
+
+      const currentRecovery =
+        presenceRecoveryCoordinator.evaluate(
+          candidate,
+          now,
+        );
+
+      if (currentRecovery.graceActive) {
+        presenceRecoveryGraceByUid.set(
+          accountUid,
+          true,
+        );
+      }
     }
 
     for (const [ownerUid, rawAccount] of Object.entries(accounts)) {
@@ -15404,6 +15513,7 @@ async function checkAutoAwayHomes(db) {
             homeId,
             sessionStatus,
             now,
+            presenceRecoveryGraceByUid.get(memberUid) === true,
           );
 
           memberPresenceByUid.set(
@@ -15524,14 +15634,18 @@ async function checkAutoAwayHomes(db) {
                 ).trim()
               : presenceStatus.staleIosPresenceAllowed
                 ? "ios_background"
-                : "signed_out",
+                : presenceStatus.androidRecoveryGraceAllowed
+                  ? "android_recovery"
+                  : "signed_out",
             reason:
               presenceAvailableForHome
                 ? presenceStatus.reactivatedAfterSignedOut
                   ? "session_reactivated"
                   : presenceStatus.staleIosPresenceAllowed
                     ? "ios_background_geofence"
-                    : presenceStatus.monitoringAvailable === true
+                    : presenceStatus.androidRecoveryGraceAllowed
+                      ? "android_presence_recovery"
+                      : presenceStatus.monitoringAvailable === true
                       ? ""
                       : String(
                           presenceStatus.monitoringBlockingReason ||
@@ -15545,6 +15659,9 @@ async function checkAutoAwayHomes(db) {
             ),
             updatedAt: now,
           };
+
+          const presenceCleanupRuntimeKey =
+            `${memberUid}|${ownerUid}|${homeId}`;
 
           if (presenceStatus.needsSessionCleanup) {
             const reason =
@@ -15561,7 +15678,15 @@ async function checkAutoAwayHomes(db) {
               presenceStatus.storedMonitoringAvailable !== false ||
               presenceStatus.monitoringBlockingReason !== reason;
 
-            if (cleanupChanged) {
+            const cleanupTargetSignature =
+              presenceCleanupTargetSignature(reason);
+
+            const cleanupAlreadyPersisted =
+              presenceCleanupPersistedRuntimeMap.get(
+                presenceCleanupRuntimeKey,
+              ) === cleanupTargetSignature;
+
+            if (cleanupChanged && !cleanupAlreadyPersisted) {
               updates[`${presencePath}/state`] = "unknown";
               updates[`${presencePath}/event`] = reason;
               updates[`${presencePath}/source`] =
@@ -15575,10 +15700,24 @@ async function checkAutoAwayHomes(db) {
                 reason;
               updates[`${presencePath}/monitoringCheckedAt`] = now;
 
+              pendingPresenceCleanupRuntimeUpdates.push([
+                presenceCleanupRuntimeKey,
+                cleanupTargetSignature,
+              ]);
+
               logs.push(
                 `👤 SESSION INACTIVE → UNKNOWN: ${memberUid} ${homeId} reason=${reason}`,
               );
+            } else if (!cleanupChanged) {
+              presenceCleanupPersistedRuntimeMap.set(
+                presenceCleanupRuntimeKey,
+                cleanupTargetSignature,
+              );
             }
+          } else {
+            presenceCleanupPersistedRuntimeMap.delete(
+              presenceCleanupRuntimeKey,
+            );
           }
 
           if (!participantSet.has(memberUid)) {
@@ -16385,6 +16524,16 @@ async function checkAutoAwayHomes(db) {
 
     if (Object.keys(updates).length > 0) {
       await db.ref().update(updates);
+
+      for (const [
+        runtimeKey,
+        targetSignature,
+      ] of pendingPresenceCleanupRuntimeUpdates) {
+        presenceCleanupPersistedRuntimeMap.set(
+          runtimeKey,
+          targetSignature,
+        );
+      }
     }
 
     for (const item of modeNotifications) {
@@ -17039,6 +17188,7 @@ db.ref("device_delete_requests").on("child_added", async (snap) => {
       });
 
       delete deviceMap[deviceId];
+      devicePersistenceRuntimeMap.delete(deviceId);
 
       await addHomeNotificationToHomeRecipients({
         ownerUid,
@@ -17120,6 +17270,7 @@ db.ref("device_delete_requests").on("child_added", async (snap) => {
     await db.ref().update(updates);
 
     delete deviceMap[deviceId];
+    devicePersistenceRuntimeMap.delete(deviceId);
 
     await addHomeNotificationToHomeRecipients({
       ownerUid,
@@ -17204,12 +17355,52 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
   const req = snap.val();
   const requestId = snap.key;
 
+  async function publishRequestResult(status, reason = "") {
+    const resultUid = String(
+      req?.requestedBy || "",
+    ).trim();
+
+    if (!resultUid || !requestId) {
+      return;
+    }
+
+    const resultRef = db.ref(
+      `accounts/${resultUid}/homeNotificationRequestResults/${requestId}`,
+    );
+    const result = {
+      status,
+      processedAt: Date.now(),
+    };
+
+    if (reason) {
+      result.reason = String(reason).slice(0, 200);
+    }
+
+    try {
+      await resultRef.set(result);
+
+      setTimeout(async () => {
+        try {
+          await resultRef.remove();
+        } catch (_) {}
+      }, 30000);
+    } catch (error) {
+      console.log(
+        "HOME NOTIFICATION RESULT ERROR:",
+        requestId,
+        error.message,
+      );
+    }
+  }
+
   async function rejectRequest(reason) {
     console.log(
       "❌ HOME NOTIFICATION REQUEST REJECTED:",
       requestId,
       reason,
     );
+
+    await publishRequestResult("rejected", reason);
 
     try {
       await snap.ref.remove();
@@ -17297,6 +17488,9 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
       "share_request",
       "join_request",
       "transfer_owner_request",
+      "share_request_denied",
+      "join_request_denied",
+      "transfer_owner_failed",
     ]);
 
     const memberTargetedTypes = new Set([
@@ -17424,6 +17618,64 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
       }
 
       role = "requester";
+    } else if (
+      isTargeted &&
+      type === "share_request_denied"
+    ) {
+      if (recipientUid !== ownerUid) {
+        await rejectRequest("INVALID SHARE DENIAL RECIPIENT");
+        return;
+      }
+
+      const shareRequestSnap = await db
+        .ref(
+          `accounts/${requestedBy}/shareRequests/${homeId}`,
+        )
+        .once("value");
+
+      const shareRequest =
+        shareRequestSnap.val() || {};
+
+      if (
+        shareRequest.type !== "share_request" ||
+        shareRequest.ownerUid !== ownerUid ||
+        shareRequest.targetUid !== requestedBy ||
+        shareRequest.homeId !== homeId
+      ) {
+        await rejectRequest("SHARE DENIAL REQUEST NOT FOUND");
+        return;
+      }
+
+      role = "invitee";
+    } else if (
+      isTargeted &&
+      type === "transfer_owner_failed"
+    ) {
+      if (recipientUid !== ownerUid) {
+        await rejectRequest("INVALID TRANSFER FAILURE RECIPIENT");
+        return;
+      }
+
+      const transferRequestSnap = await db
+        .ref(
+          `accounts/${requestedBy}/shareRequests/transfer_${homeId}_${ownerUid}`,
+        )
+        .once("value");
+
+      const transferRequest =
+        transferRequestSnap.val() || {};
+
+      if (
+        transferRequest.type !== "transfer_owner_request" ||
+        transferRequest.homeId !== homeId ||
+        transferRequest.oldOwnerUid !== ownerUid ||
+        transferRequest.newOwnerUid !== requestedBy
+      ) {
+        await rejectRequest("TRANSFER FAILURE REQUEST NOT FOUND");
+        return;
+      }
+
+      role = "transfer_target";
     } else if (requestedBy !== ownerUid) {
       const [sharedHomeSnap, sharedMemberSnap] =
         await Promise.all([
@@ -17527,6 +17779,38 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
         await rejectRequest(
           "TRANSFER REQUEST NOT FOUND",
         );
+        return;
+      }
+    }
+
+    if (
+      isTargeted &&
+      type === "join_request_denied"
+    ) {
+      if (
+        recipientUid === ownerUid ||
+        (role !== "owner" && role !== "admin")
+      ) {
+        await rejectRequest("NO JOIN DENIAL PERMISSION");
+        return;
+      }
+
+      const joinRequestSnap = await db
+        .ref(
+          `accounts/${requestedBy}/shareRequests/${homeId}_${recipientUid}`,
+        )
+        .once("value");
+
+      const joinRequest =
+        joinRequestSnap.val() || {};
+
+      if (
+        joinRequest.type !== "join_request" ||
+        joinRequest.ownerUid !== ownerUid ||
+        joinRequest.targetUid !== recipientUid ||
+        joinRequest.homeId !== homeId
+      ) {
+        await rejectRequest("JOIN DENIAL REQUEST NOT FOUND");
         return;
       }
     }
@@ -17837,6 +18121,11 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
     const homeName =
       String(home.name || "").trim() || homeId;
 
+    const requestDataForDisplay =
+      req.data && typeof req.data === "object"
+        ? req.data
+        : {};
+
     let finalType = type;
     let finalCategory = category;
     let finalSeverity = severity;
@@ -17892,6 +18181,90 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
       finalTitle = "Yêu cầu chuyển quyền chủ nhà";
       finalMessage =
         `${actorName} muốn chuyển quyền chủ nhà "${homeName}" cho bạn.`;
+      finalEntityType = "home";
+      finalEntityId = homeId;
+    }
+
+    if (
+      isTargeted &&
+      type === "share_request_accepted"
+    ) {
+      finalCategory = "member";
+      finalSeverity = "success";
+      finalTitle = "Lời mời chia sẻ nhà";
+      finalMessage =
+        `${actorName} đã chấp nhận lời mời tham gia nhà "${homeName}".`;
+      finalEntityType = "member";
+      finalEntityId = requestedBy;
+    }
+
+    if (
+      isTargeted &&
+      type === "share_request_denied"
+    ) {
+      finalCategory = "member";
+      finalSeverity = "warning";
+      finalTitle = "Lời mời chia sẻ nhà";
+      finalMessage =
+        `${actorName} đã từ chối lời mời tham gia nhà "${homeName}".`;
+      finalEntityType = "member";
+      finalEntityId = requestedBy;
+    }
+
+    if (
+      isTargeted &&
+      type === "join_request_accepted"
+    ) {
+      finalCategory = "member";
+      finalSeverity = "success";
+      finalTitle = "Yêu cầu gia nhập nhà";
+      finalMessage =
+        `Yêu cầu gia nhập nhà "${homeName}" đã được chấp nhận.`;
+      finalEntityType = "member";
+      finalEntityId = recipientUid;
+    }
+
+    if (
+      isTargeted &&
+      type === "join_request_denied"
+    ) {
+      finalCategory = "member";
+      finalSeverity = "warning";
+      finalTitle = "Yêu cầu gia nhập nhà";
+      finalMessage =
+        `Yêu cầu gia nhập nhà "${homeName}" đã bị từ chối.`;
+      finalEntityType = "member";
+      finalEntityId = recipientUid;
+    }
+
+    if (
+      isTargeted &&
+      type === "member_removed"
+    ) {
+      const removedMemberName = String(
+        requestDataForDisplay.memberName ||
+        requestDataForDisplay.targetName ||
+        "thành viên",
+      ).trim() || "thành viên";
+
+      finalCategory = "member";
+      finalSeverity = "warning";
+      finalTitle = "Đã xoá thành viên";
+      finalMessage =
+        `${actorName} đã xoá ${removedMemberName} khỏi nhà "${homeName}".`;
+      finalEntityType = "member";
+      finalEntityId = recipientUid;
+    }
+
+    if (
+      isTargeted &&
+      type === "transfer_owner_failed"
+    ) {
+      finalCategory = "member";
+      finalSeverity = "warning";
+      finalTitle = "Yêu cầu chuyển quyền chủ nhà";
+      finalMessage =
+        `Yêu cầu chuyển quyền chủ nhà "${homeName}" không được hoàn tất.`;
       finalEntityType = "home";
       finalEntityId = homeId;
     }
@@ -18051,6 +18424,7 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
       );
     }
 
+    await publishRequestResult("completed");
     await snap.ref.remove();
 
     console.log(
@@ -18066,6 +18440,11 @@ db.ref("home_notification_requests").on("child_added", async (snap) => {
       "HOME NOTIFICATION REQUEST ERROR:",
       requestId,
       err.message,
+    );
+
+    await publishRequestResult(
+      "failed",
+      err.message || "UNKNOWN ERROR",
     );
 
     try {
@@ -18469,6 +18848,69 @@ db.ref("transfer_owner_accept_requests").on(
         };
       }
 
+      const transferHomeName =
+        String(homeData.name || "").trim() || homeId;
+      const newOwnerAccount =
+        newOwnerAccountSnap.val() || {};
+      const newOwnerProfile =
+        newOwnerAccount.profile || {};
+      const newOwnerName =
+        String(
+          newOwnerProfile.name ||
+          newOwnerAccount.name ||
+          newOwnerAccount.email ||
+          "Chủ nhà mới",
+        ).trim() || "Chủ nhà mới";
+      const oldOwnerName =
+        String(
+          oldOwnerDirectory.name ||
+          oldOwnerDirectory.email ||
+          "Chủ nhà cũ",
+        ).trim() || "Chủ nhà cũ";
+      const transferMessage =
+        `${newOwnerName} đã trở thành chủ nhà của "${transferHomeName}".`;
+      const transferData = {
+        oldOwnerUid,
+        oldOwnerName,
+        newOwnerUid,
+        newOwnerName,
+        actorName: newOwnerName,
+        homeName: transferHomeName,
+      };
+
+      await Promise.all([
+        addHomeNotificationFromBackend({
+          uid: oldOwnerUid,
+          ownerUid: newOwnerUid,
+          homeId,
+          homeName: transferHomeName,
+          type: "transfer_owner_accepted",
+          category: "member",
+          severity: "success",
+          title: "Yêu cầu chuyển quyền chủ nhà",
+          message: transferMessage,
+          actorUid: newOwnerUid,
+          entityType: "home",
+          entityId: homeId,
+          data: transferData,
+        }),
+        addHomeNotificationFromBackend({
+          uid: newOwnerUid,
+          ownerUid: newOwnerUid,
+          homeId,
+          homeName: transferHomeName,
+          type: "transfer_owner_accepted",
+          category: "member",
+          severity: "success",
+          title: "Yêu cầu chuyển quyền chủ nhà",
+          message: transferMessage,
+          actorUid: newOwnerUid,
+          entityType: "home",
+          entityId: homeId,
+          data: transferData,
+        }),
+      ]);
+
       await finishRequest("completed");
 
       console.log(
@@ -18484,6 +18926,77 @@ db.ref("transfer_owner_accept_requests").on(
         requestId,
         err.message,
       );
+
+      try {
+        const failedOldOwnerUid = String(
+          req?.oldOwnerUid || "",
+        ).trim();
+        const failedNewOwnerUid = String(
+          req?.newOwnerUid || "",
+        ).trim();
+        const failedHomeId = String(
+          req?.homeId || "",
+        ).trim();
+
+        if (
+          failedOldOwnerUid &&
+          failedNewOwnerUid &&
+          failedHomeId
+        ) {
+          const failedHome =
+            getCachedHomeData(
+              failedOldOwnerUid,
+              failedHomeId,
+            ) || {};
+          const failedHomeName =
+            String(failedHome.name || "").trim() ||
+            failedHomeId;
+          const failureData = {
+            oldOwnerUid: failedOldOwnerUid,
+            newOwnerUid: failedNewOwnerUid,
+            homeName: failedHomeName,
+            reason: String(err.message || "UNKNOWN ERROR").slice(0, 200),
+          };
+
+          await Promise.all([
+            addHomeNotificationFromBackend({
+              uid: failedOldOwnerUid,
+              ownerUid: failedOldOwnerUid,
+              homeId: failedHomeId,
+              homeName: failedHomeName,
+              type: "transfer_owner_failed",
+              category: "member",
+              severity: "warning",
+              title: "Yêu cầu chuyển quyền chủ nhà",
+              message: `Không thể hoàn tất chuyển quyền chủ nhà "${failedHomeName}".`,
+              actorUid: failedNewOwnerUid,
+              entityType: "home",
+              entityId: failedHomeId,
+              data: failureData,
+            }),
+            addHomeNotificationFromBackend({
+              uid: failedNewOwnerUid,
+              ownerUid: failedOldOwnerUid,
+              homeId: failedHomeId,
+              homeName: failedHomeName,
+              type: "transfer_owner_failed",
+              category: "member",
+              severity: "warning",
+              title: "Yêu cầu chuyển quyền chủ nhà",
+              message: `Không thể hoàn tất chuyển quyền chủ nhà "${failedHomeName}".`,
+              actorUid: failedNewOwnerUid,
+              entityType: "home",
+              entityId: failedHomeId,
+              data: failureData,
+            }),
+          ]);
+        }
+      } catch (notificationError) {
+        console.log(
+          "TRANSFER OWNER FAILURE NOTIFICATION ERROR:",
+          notificationError.message,
+        );
+      }
 
       await finishRequest(
         "rejected",
@@ -18614,6 +19127,8 @@ db.ref("alarm_pause_requests").on("child_added", async (snap) => {
       .once("value");
 
     const sharedUsers = sharedSnap.val() || {};
+    const trustedHomeName =
+      String(home.name || "").trim() || homeId;
 
     if (action === "remove") {
       cancelAlarmPauseExpiryTimer(ownerUid, homeId);
@@ -18636,6 +19151,33 @@ db.ref("alarm_pause_requests").on("child_added", async (snap) => {
       }
 
       await db.ref().update(updates);
+
+      await addHomeNotificationToHomeRecipients({
+        ownerUid,
+        homeId,
+        homeName: trustedHomeName,
+        type: "alarm_pause_cancelled",
+        category: "alarm",
+        severity: "success",
+        title: "Báo động đã hoạt động trở lại",
+        message:
+          `${trustedActorName} đã huỷ tạm dừng báo động.`,
+        actorUid: createdByUid,
+        entityType: "home",
+        entityId: homeId,
+        recipientUids: [
+          ownerUid,
+          ...Object.keys(sharedUsers),
+        ],
+        dedupeKey:
+          `alarm_pause_cancelled|${requestId}`,
+        dedupeMs: 60 * 1000,
+        data: {
+          actorName: trustedActorName,
+          homeName: trustedHomeName,
+          reason: "cancelled_early",
+        },
+      });
 
       console.log(
         "🧹 ALARM PAUSE REMOVED:",
@@ -18680,9 +19222,6 @@ db.ref("alarm_pause_requests").on("child_added", async (snap) => {
       await reject("OUTSIDE ALARM RANGE");
       return;
     }
-
-    const trustedHomeName =
-      String(home.name || "").trim() || homeId;
 
     const pauseData = {
       date,
@@ -20017,6 +20556,66 @@ async function enqueueCarbonMonoxidePacket(
   }
 }
 
+function getDevicePersistenceRuntime(deviceId, currentDevice) {
+  const cleanDeviceId = String(deviceId || "").trim();
+
+  if (!cleanDeviceId) {
+    return {
+      persistedTelemetry: {},
+      lastTelemetryPersistAt: 0,
+    };
+  }
+
+  let runtime = devicePersistenceRuntimeMap.get(cleanDeviceId);
+
+  if (!runtime) {
+    const device = asObject(currentDevice);
+
+    runtime = {
+      persistedTelemetry:
+        updatePersistedTelemetrySnapshot({}, device),
+      lastTelemetryPersistAt: Number(
+        device.updated_at || 0,
+      ),
+    };
+
+    devicePersistenceRuntimeMap.set(
+      cleanDeviceId,
+      runtime,
+    );
+  }
+
+  return runtime;
+}
+
+function recordDeviceFirebaseUpdate(
+  deviceId,
+  runtime,
+  firebaseUpdate,
+  now,
+) {
+  const cleanDeviceId = String(deviceId || "").trim();
+
+  if (!cleanDeviceId || !runtime) {
+    return;
+  }
+
+  runtime.persistedTelemetry =
+    updatePersistedTelemetrySnapshot(
+      runtime.persistedTelemetry,
+      firebaseUpdate,
+    );
+
+  if (firebaseUpdateContainsTelemetry(firebaseUpdate)) {
+    runtime.lastTelemetryPersistAt = Number(now || Date.now());
+  }
+
+  devicePersistenceRuntimeMap.set(
+    cleanDeviceId,
+    runtime,
+  );
+}
+
 // ================= MQTT HANDLER =================
 client.on("message", async (topic, msg) => {
   try {
@@ -20356,25 +20955,74 @@ client.on("message", async (topic, msg) => {
         `accounts/${uid}/homes/${homeId}/devices/${deviceId}`,
       );
 
-      const deviceSnap = await deviceRef.once("value");
+      let currentDevice =
+        getCachedHomeData(uid, homeId)?.devices?.[deviceId] ||
+        null;
 
-      if (!deviceSnap.exists()) {
+      if (!currentDevice && firebaseConnected) {
+        const deviceSnap = await deviceRef.once("value");
+
+        if (!deviceSnap.exists()) {
+          console.log(
+            "🧹 DEVICE DELETED FROM APP, REMOVE MAP:",
+            deviceId,
+          );
+
+          delete deviceMap[deviceId];
+          devicePersistenceRuntimeMap.delete(deviceId);
+
+          await db.ref(`system/devices_by_ieee/${deviceId}`).remove();
+
+          return;
+        }
+
+        currentDevice = deviceSnap.val() || {};
+      }
+
+      if (!currentDevice) {
         console.log(
-          "🧹 DEVICE DELETED FROM APP, REMOVE MAP:",
+          "⚠️ AVAILABILITY SKIPPED, NO LOCAL SNAPSHOT:",
           deviceId,
         );
-
-        delete deviceMap[deviceId];
-
-        await db.ref(`system/devices_by_ieee/${deviceId}`).remove();
-
         return;
       }
 
-      await deviceRef.update({
+      if (currentDevice.availability === availabilityValue) {
+        return;
+      }
+
+      const availabilityUpdate = {
         availability: availabilityValue,
         updated_at: Date.now(),
-      });
+      };
+
+      applyDeviceUpdateToLocalCache(
+        uid,
+        homeId,
+        deviceId,
+        availabilityUpdate,
+      );
+
+      if (firebaseConnected) {
+        try {
+          await deviceRef.update(availabilityUpdate);
+        } catch (error) {
+          console.log(
+            "📴 AVAILABILITY UPDATE QUEUED:",
+            deviceId,
+            error.message,
+          );
+          enqueueOfflineFirebaseUpdate(
+            `accounts/${uid}/homes/${homeId}/devices/${deviceId}`,
+            availabilityUpdate,
+          );
+        }
+      } else {
+        enqueueOfflineFirebaseUpdate(
+          `accounts/${uid}/homes/${homeId}/devices/${deviceId}`,
+          availabilityUpdate,
+        );
+      }
 
       console.log("📶 AVAILABILITY:", deviceId, availabilityValue);
       return;
@@ -20448,9 +21096,7 @@ client.on("message", async (topic, msg) => {
         currentDeviceType,
       );
 
-    let updateData = {
-      updated_at: now,
-    };
+    let updateData = {};
 
     if (
       currentDeviceType === "unknown" &&
@@ -20725,31 +21371,68 @@ client.on("message", async (topic, msg) => {
         : "reported_off";
     }
 
+    const persistenceRuntime =
+      getDevicePersistenceRuntime(
+        deviceId,
+        oldData,
+      );
+
+    const firebaseUpdateData =
+      buildDeviceFirebaseUpdate({
+        candidateUpdate: updateData,
+        currentDevice: oldData,
+        persistedTelemetry:
+          persistenceRuntime.persistedTelemetry,
+        now,
+        lastTelemetryPersistAt:
+          persistenceRuntime.lastTelemetryPersistAt,
+        telemetryIntervalMs:
+          DEVICE_TELEMETRY_PERSIST_INTERVAL_MS,
+      });
+
+    const cacheUpdateData = {
+      ...updateData,
+    };
+
+    if (firebaseUpdateData.updated_at !== undefined) {
+      cacheUpdateData.updated_at =
+        firebaseUpdateData.updated_at;
+    }
+
     const latestHomeFromCache = applyDeviceUpdateToLocalCache(
       uid,
       homeId,
       deviceId,
-      updateData,
+      cacheUpdateData,
     );
 
-    if (firebaseConnected) {
-      try {
-        await deviceRef.update(updateData);
-      } catch (error) {
-        console.log(
-          "📴 DEVICE UPDATE QUEUED:",
-          deviceId,
-          error.message,
-        );
+    if (Object.keys(firebaseUpdateData).length > 0) {
+      if (firebaseConnected) {
+        try {
+          await deviceRef.update(firebaseUpdateData);
+        } catch (error) {
+          console.log(
+            "📴 DEVICE UPDATE QUEUED:",
+            deviceId,
+            error.message,
+          );
+          enqueueOfflineFirebaseUpdate(
+            `accounts/${uid}/homes/${homeId}/devices/${deviceId}`,
+            firebaseUpdateData,
+          );
+        }
+      } else {
         enqueueOfflineFirebaseUpdate(
           `accounts/${uid}/homes/${homeId}/devices/${deviceId}`,
-          updateData,
+          firebaseUpdateData,
         );
       }
-    } else {
-      enqueueOfflineFirebaseUpdate(
-        `accounts/${uid}/homes/${homeId}/devices/${deviceId}`,
-        updateData,
+
+      recordDeviceFirebaseUpdate(
+        deviceId,
+        persistenceRuntime,
+        firebaseUpdateData,
+        now,
       );
     }
 
@@ -21009,7 +21692,13 @@ client.on("message", async (topic, msg) => {
       );
     }
 
-    console.log("📡 UPDATE:", deviceId, updateData);
+    if (Object.keys(firebaseUpdateData).length > 0) {
+      console.log(
+        "📡 FIREBASE DEVICE UPDATE:",
+        deviceId,
+        firebaseUpdateData,
+      );
+    }
 
     // ===== HOME ALARM RECEIVERS =====
     // Chủ nhà + sharedByHome/{homeId}; mỗi receiver được xử lý độc lập.

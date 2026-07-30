@@ -36,6 +36,8 @@ FILES=(
   "hub_update_bridge.js"
   "hub_update_push.js"
   "hub_update_push_localizations.js"
+  "presence_recovery.js"
+  "firebase_write_policy.js"
   "general_id.js"
   "package.json"
   "package-lock.json"
@@ -254,6 +256,8 @@ done
 /usr/bin/node --check "${STAGE_DIR}/hub_update_bridge.js"
 /usr/bin/node --check "${STAGE_DIR}/hub_update_push.js"
 /usr/bin/node --check "${STAGE_DIR}/hub_update_push_localizations.js"
+/usr/bin/node --check "${STAGE_DIR}/presence_recovery.js"
+/usr/bin/node --check "${STAGE_DIR}/firebase_write_policy.js"
 /usr/bin/node --check "${STAGE_DIR}/general_id.js"
 /usr/bin/node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
   "${STAGE_DIR}/package.json"
