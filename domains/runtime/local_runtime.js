@@ -89,6 +89,8 @@ function createLocalRuntimeDomain({
   let firebaseConnectionMonitorStarted = false;
   let firebaseConnectionRef = null;
   let firebaseConnectionListener = null;
+  let firebaseHasConnectedOnce = false;
+  let firebaseDisconnectedAfterConnected = false;
 
   function ensureLocalRuntimeDirectory() {
     fs.mkdirSync(localRuntimeDir, {
@@ -586,6 +588,13 @@ function createLocalRuntimeDomain({
       }
 
       if (!nextConnected) {
+        // Firebase may emit an initial false snapshot while the SDK is still
+        // establishing its first connection. That is not a disconnect and
+        // must not make the following true snapshot look like a reconnect.
+        if (firebaseHasConnectedOnce) {
+          firebaseDisconnectedAfterConnected = true;
+        }
+
         void resumeOfflineAlarmDemandsFromSnapshot().catch((error) => {
           log(
             "OFFLINE ALARM RESUME ERROR:",
@@ -595,11 +604,24 @@ function createLocalRuntimeDomain({
         return;
       }
 
+      const isRealReconnect =
+        firebaseHasConnectedOnce &&
+        firebaseDisconnectedAfterConnected;
+      firebaseHasConnectedOnce = true;
+      firebaseDisconnectedAfterConnected = false;
+
       scheduleLocalRuntimeSnapshotSave();
 
       setTimeoutFn(() => {
         void (async () => {
           await flushOfflineOperationQueue();
+
+          // Startup can emit false -> true before the first real cloud
+          // connection. Resume/reconcile only after this process has already
+          // been connected once and then observed an actual disconnect.
+          if (!isRealReconnect) {
+            return;
+          }
 
           try {
             await resumeActiveAlarmIncidents();

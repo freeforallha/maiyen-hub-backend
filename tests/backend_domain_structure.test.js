@@ -18,6 +18,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(source, /createHubIdentity/);
   assert.match(source, /createHubHeartbeat/);
   assert.match(source, /createOrderedListCleanup/);
+  assert.match(source, /createFcmDeliveryDomain/);
+  assert.match(source, /domains\/notifications\/fcm_delivery/);
   assert.match(source, /createSystemHealthDomain/);
   assert.match(source, /createAutoAwayDomain/);
   assert.match(source, /createLocalRuntimeDomain/);
@@ -38,6 +40,9 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
     /const crypto = require\(["']crypto["']\);/,
   );
   assert.doesNotMatch(source, /function readConnectedWifiInfo\(/);
+  assert.doesNotMatch(source, /function getUserFcmTargets\(/);
+  assert.doesNotMatch(source, /async function sendPushToUser\(/);
+  assert.doesNotMatch(source, /function localizePushMessageForUser\(/);
   assert.doesNotMatch(source, /async function getHomesLinkedToThisHub\(/);
   assert.doesNotMatch(source, /async function trimOrderedListByTime\(/);
   assert.doesNotMatch(source, /function evaluateHomeSystemHealth\(/);
@@ -105,6 +110,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   const deploySource = fs.readFileSync(
     path.join(ROOT, "scripts", "deploy_backend_production.sh"),
     "utf8",
+  );
+  assert.match(
+    deploySource,
+    /domains\/notifications\/fcm_delivery\.js/,
   );
   assert.match(
     deploySource,

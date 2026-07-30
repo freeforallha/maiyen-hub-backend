@@ -463,3 +463,60 @@ test("old transient emergency is superseded before a fresh incident is created",
     Object.keys(entry.value).some((path) => path.includes("incident-1")),
   ));
 });
+
+test("concurrent resume calls share one in-flight scan", async () => {
+  const incident = {
+    incidentId: "i1",
+    receiverUid: "u1",
+    ownerUid: "owner",
+    homeId: "home",
+    flowType: "security",
+    status: "active",
+    stage: "detected",
+    schemaVersion: 3,
+    eventCategory: "security",
+    alarmLevel: "warning",
+    items: [makeItem({ type: "door", reason: "Door open" })],
+  };
+  const db = createMemoryDb({
+    "accounts/u1/alarmIncidents/i1": incident,
+  });
+  let releaseValidation;
+  let validationStarted;
+  const validationGate = new Promise((resolve) => {
+    releaseValidation = resolve;
+  });
+  const validationEntered = new Promise((resolve) => {
+    validationStarted = resolve;
+  });
+  const { runtime, calls } = makeRuntime({
+    db,
+    getCachedAccountsObject: () => ({
+      u1: { alarmIncidents: { i1: incident } },
+    }),
+    validateAndResolveSecurityIncident: async () => {
+      validationStarted();
+      await validationGate;
+      return {
+        active: true,
+        items: normalizeItems(incident.items),
+      };
+    },
+  });
+
+  const first = runtime.resumeActiveAlarmIncidents();
+  await validationEntered;
+  const second = runtime.resumeActiveAlarmIncidents();
+  releaseValidation();
+
+  await Promise.all([first, second]);
+
+  assert.equal(calls.localSet.length, 1);
+  assert.equal(calls.scheduled.length, 1);
+  assert.equal(
+    calls.logs.filter(
+      (entry) => entry[0] === "🚨 ACTIVE ALARM INCIDENTS RESUMED:",
+    ).length,
+    1,
+  );
+});

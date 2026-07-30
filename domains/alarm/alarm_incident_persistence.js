@@ -884,7 +884,9 @@ function createAlarmIncidentPersistence({
     }
   }
 
-  async function resumeActiveAlarmIncidents() {
+  let activeAlarmResumePromise = null;
+
+  async function performResumeActiveAlarmIncidents() {
     try {
       const accounts = getCachedAccountsObject();
       let resumed = 0;
@@ -1027,6 +1029,21 @@ function createAlarmIncidentPersistence({
         "ALARM INCIDENT RESUME ERROR:",
         err.message,
       );
+    }
+  }
+
+  async function resumeActiveAlarmIncidents() {
+    if (activeAlarmResumePromise) {
+      return activeAlarmResumePromise;
+    }
+
+    activeAlarmResumePromise =
+      performResumeActiveAlarmIncidents();
+
+    try {
+      return await activeAlarmResumePromise;
+    } finally {
+      activeAlarmResumePromise = null;
     }
   }
 

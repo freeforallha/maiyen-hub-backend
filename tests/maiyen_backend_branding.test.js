@@ -53,6 +53,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const persistenceSource = read(
     "domains/alarm/alarm_incident_persistence.js",
   );
+  const fcmDeliverySource = read(
+    "domains/notifications/fcm_delivery.js",
+  );
 
   assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
   assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
@@ -65,6 +68,8 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.doesNotMatch(lifecycleSource, /function buildSafeHome/);
   assert.doesNotMatch(persistenceSource, /function getSafeHome/);
   assert.doesNotMatch(persistenceSource, /function buildSafeHome/);
+  assert.doesNotMatch(fcmDeliverySource, /function getSafeHome/);
+  assert.doesNotMatch(fcmDeliverySource, /function buildSafeHome/);
   assert.doesNotMatch(source, /SAFEHOME BACKEND READY/);
   assert.match(read("general_id.js"), /MAIYEN HUB DIAGNOSTIC REPORT/);
 });

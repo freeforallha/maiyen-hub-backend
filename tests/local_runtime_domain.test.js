@@ -22,6 +22,9 @@ function createRuntime({
   const deviceMap = {};
   const writes = [];
   const alarmCalls = [];
+  const resumeCalls = [];
+  const reconcileCalls = [];
+  const offlineResumeCalls = [];
   const logs = [];
   const timeouts = [];
   const intervals = [];
@@ -76,6 +79,15 @@ function createRuntime({
     startOrMergeAlarmIncidents: async (uid, items) => {
       alarmCalls.push({ uid, items: structuredClone(items) });
     },
+    resumeOfflineAlarmDemandsFromSnapshot: async () => {
+      offlineResumeCalls.push(true);
+    },
+    resumeActiveAlarmIncidents: async () => {
+      resumeCalls.push(true);
+    },
+    reconcileAllPhysicalSirens: async (options) => {
+      reconcileCalls.push(structuredClone(options));
+    },
     now: () => currentTime,
     setTimeoutFn: (callback, delay) => {
       const timer = { callback, delay, type: "timeout" };
@@ -104,6 +116,9 @@ function createRuntime({
     deviceMap,
     writes,
     alarmCalls,
+    resumeCalls,
+    reconcileCalls,
+    offlineResumeCalls,
     logs,
     timeouts,
     intervals,
@@ -284,6 +299,54 @@ test("Firebase monitor starts once and updates the shared connection state", () 
     runtime.domain.stop();
     assert.equal(runtime.getConnectionOffCount(), 1);
     assert.equal(runtime.intervals[0].cleared, true);
+  } finally {
+    runtime.cleanup();
+  }
+});
+
+
+test("initial Firebase false -> true is not reconnect; real reconnect resumes once", async () => {
+  const runtime = createRuntime();
+
+  try {
+    assert.equal(runtime.domain.startFirebaseConnectionMonitor(), true);
+
+    // Firebase commonly emits false while its first connection is pending.
+    runtime.getConnectionListener()({ val: () => false });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runtime.offlineResumeCalls.length, 1);
+
+    runtime.getConnectionListener()({ val: () => true });
+
+    const initialConnectTimer = runtime.timeouts.find(
+      (timer) => timer.delay === 1000,
+    );
+    assert.ok(initialConnectTimer);
+    initialConnectTimer.callback();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runtime.resumeCalls.length, 0);
+    assert.equal(runtime.reconcileCalls.length, 0);
+
+    // Only a disconnect observed after a real connection can arm reconnect.
+    runtime.getConnectionListener()({ val: () => false });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runtime.offlineResumeCalls.length, 2);
+
+    runtime.getConnectionListener()({ val: () => true });
+
+    const reconnectTimers = runtime.timeouts.filter(
+      (timer) => timer.delay === 1000,
+    );
+    assert.equal(reconnectTimers.length, 2);
+    reconnectTimers[1].callback();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runtime.resumeCalls.length, 1);
+    assert.deepEqual(runtime.reconcileCalls, [{
+      force: true,
+      reason: "firebase_reconnected",
+    }]);
   } finally {
     runtime.cleanup();
   }

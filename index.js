@@ -29,6 +29,9 @@ const {
   createOrderedListCleanup,
 } = require("./domains/shared/ordered_list_cleanup");
 const {
+  createFcmDeliveryDomain,
+} = require("./domains/notifications/fcm_delivery");
+const {
   createSystemHealthDomain,
 } = require("./domains/system_health/system_health");
 const {
@@ -565,6 +568,22 @@ const accountCache = new Map();
 const sharedByHomeCache = new Map();
 let backendDataCacheStarted = false;
 
+// ================= FCM DELIVERY DOMAIN =================
+// Owns active-session token selection, per-user localization, Firebase
+// Messaging delivery results and cleanup of invalid installation tokens.
+const {
+  getUserLanguageCode,
+  sendPushToUser,
+} = createFcmDeliveryDomain({
+  db,
+  admin,
+  accountCache,
+  normalizeLanguageCode,
+  localizeBackendText,
+  localizeAlarmItemsJson,
+  log: (...args) => console.log(...args),
+});
+
 // ================= SENSOR ALARM ENGINE DOMAIN =================
 // Owns sensor-event normalization, event latching/debounce, Alarm policy and
 // activation priority. Firebase access is injected only for persisted event
@@ -819,76 +838,6 @@ const {
   normalizeHomeSecurityMode,
   log: (...args) => console.log(...args),
 });
-
-function getUserLanguageCode(uid) {
-  const cleanUid = String(uid || "").trim();
-  const account = cleanUid ? accountCache.get(cleanUid) : null;
-
-  return normalizeLanguageCode(
-    account?.languageCode ||
-    account?.profile?.languageCode ||
-    "vi",
-  );
-}
-
-function localizePushMessageForUser(uid, rawMessage) {
-  const languageCode = getUserLanguageCode(uid);
-  const message = JSON.parse(JSON.stringify(rawMessage || {}));
-
-  if (message.data && typeof message.data === "object") {
-    // Localize every user-facing text field used by current and older FCM
-    // payloads. Previously only title/body/reason were covered, so payloads
-    // using message, text, subtitle or statusText could remain Vietnamese.
-    for (const field of [
-      "title",
-      "body",
-      "message",
-      "text",
-      "subtitle",
-      "reason",
-      "statusText",
-    ]) {
-      if (typeof message.data[field] === "string") {
-        message.data[field] = localizeBackendText(
-          languageCode,
-          message.data[field],
-        );
-      }
-    }
-
-    if (typeof message.data.alarmItems === "string") {
-      message.data.alarmItems = localizeAlarmItemsJson(
-        languageCode,
-        message.data.alarmItems,
-      );
-    }
-
-    message.data.languageCode = languageCode;
-  }
-
-  if (message.notification && typeof message.notification === "object") {
-    if (typeof message.notification.title === "string") {
-      message.notification.title = localizeBackendText(languageCode, message.notification.title);
-    }
-    if (typeof message.notification.body === "string") {
-      message.notification.body = localizeBackendText(languageCode, message.notification.body);
-    }
-  }
-
-  const apnsAlert = message?.apns?.payload?.aps?.alert;
-  if (typeof apnsAlert === "string") {
-    message.apns.payload.aps.alert = localizeBackendText(languageCode, apnsAlert);
-  } else if (apnsAlert && typeof apnsAlert === "object") {
-    if (typeof apnsAlert.title === "string") {
-      apnsAlert.title = localizeBackendText(languageCode, apnsAlert.title);
-    }
-    if (typeof apnsAlert.body === "string") {
-      apnsAlert.body = localizeBackendText(languageCode, apnsAlert.body);
-    }
-  }
-
-  return message;
-}
 
 function getCachedAccountsObject() {
   return Object.fromEntries(accountCache.entries());
@@ -1155,234 +1104,10 @@ function setPermitJoin(enable, time = 60) {
   });
 }
 
-// ================= PUSH =================
-
-function normalizeFcmToken(raw) {
-  return String(raw || "").trim();
-}
-
-async function getUserFcmTargets(uid) {
-  const cleanUid = String(uid || "").trim();
-
-  if (!cleanUid) {
-    return [];
-  }
-
-  const accountSnap = await db
-    .ref(`accounts/${cleanUid}`)
-    .once("value");
-
-  const account = accountSnap.val() || {};
-  const activeSession =
-    account.activeSession &&
-    typeof account.activeSession === "object"
-      ? account.activeSession
-      : {};
-
-  const installationId = String(
-    activeSession.installationId || "",
-  ).trim();
-  const sessionId = String(
-    activeSession.sessionId || "",
-  ).trim();
-
-  if (!installationId || !sessionId) {
-    console.log(
-      "❌ NO ACTIVE SESSION FOR PUSH:",
-      cleanUid,
-    );
-    return [];
-  }
-
-  const session =
-    account.sessions?.[installationId] &&
-    typeof account.sessions[installationId] === "object"
-      ? account.sessions[installationId]
-      : null;
-
-  if (
-    session &&
-    (
-      String(session.sessionId || "").trim() !== sessionId ||
-      session.signedIn === false
-    )
-  ) {
-    console.log(
-      "❌ ACTIVE SESSION RECORD MISMATCH:",
-      cleanUid,
-      installationId,
-    );
-    return [];
-  }
-
-  const tokenEntry =
-    account.fcmTokens?.[installationId];
-
-  if (
-    !tokenEntry ||
-    typeof tokenEntry !== "object"
-  ) {
-    console.log(
-      "❌ NO ACTIVE INSTALLATION TOKEN:",
-      cleanUid,
-      installationId,
-    );
-    return [];
-  }
-
-  const tokenSessionId = String(
-    tokenEntry.sessionId || "",
-  ).trim();
-  const token = normalizeFcmToken(tokenEntry.token);
-
-  if (
-    !token ||
-    tokenSessionId !== sessionId
-  ) {
-    console.log(
-      "❌ ACTIVE TOKEN SESSION MISMATCH:",
-      cleanUid,
-      installationId,
-    );
-    return [];
-  }
-
-  return [
-    {
-      token,
-      paths: [
-        `accounts/${cleanUid}/fcmTokens/${installationId}`,
-      ],
-    },
-  ];
-}
-
-function isInvalidFcmTokenError(error) {
-  const code = String(
-    error?.errorInfo?.code ||
-    error?.code ||
-    "",
-  );
-
-  return (
-    code ===
-      "messaging/registration-token-not-registered" ||
-    code ===
-      "messaging/invalid-registration-token"
-  );
-}
-
-async function removeInvalidFcmTokenPaths(paths) {
-  const updates = {};
-
-  for (const path of paths) {
-    if (path) {
-      updates[path] = null;
-    }
-  }
-
-  if (Object.keys(updates).length === 0) {
-    return;
-  }
-
-  await db.ref().update(updates);
-}
-
-async function sendPushToUser(
-  uid,
-  message,
-  logLabel = "PUSH",
-) {
-  const targets = await getUserFcmTargets(uid);
-  const localizedMessage = localizePushMessageForUser(uid, message);
-
-  if (targets.length === 0) {
-    console.log(
-      "❌ NO FCM TOKEN:",
-      uid,
-      logLabel,
-    );
-
-    return {
-      total: 0,
-      sent: 0,
-      failed: 0,
-      removed: 0,
-    };
-  }
-
-  let sent = 0;
-  let failed = 0;
-  const invalidPaths = new Set();
-
-  for (const target of targets) {
-    try {
-      await admin.messaging().send({
-        ...localizedMessage,
-        token: target.token,
-      });
-
-      sent++;
-    } catch (error) {
-      failed++;
-
-      if (isInvalidFcmTokenError(error)) {
-        for (const path of target.paths) {
-          invalidPaths.add(path);
-        }
-
-        console.log(
-          "🧹 INVALID FCM TOKEN:",
-          uid,
-          logLabel,
-          error?.errorInfo?.code ||
-            error?.code ||
-            error.message,
-        );
-
-        continue;
-      }
-
-      console.log(
-        "FCM TARGET SEND ERROR:",
-        uid,
-        logLabel,
-        error.message,
-      );
-    }
-  }
-
-  if (invalidPaths.size > 0) {
-    try {
-      await removeInvalidFcmTokenPaths(
-        Array.from(invalidPaths),
-      );
-    } catch (error) {
-      console.log(
-        "FCM TOKEN CLEANUP ERROR:",
-        uid,
-        logLabel,
-        error.message,
-      );
-    }
-  }
-
-  console.log(
-    "📨 MULTI-DEVICE PUSH:",
-    uid,
-    logLabel,
-    `sent=${sent}`,
-    `failed=${failed}`,
-    `targets=${targets.length}`,
-  );
-
-  return {
-    total: targets.length,
-    sent,
-    failed,
-    removed: invalidPaths.size,
-  };
-}
+// ================= PUSH PAYLOADS =================
+// Token selection, localization and Firebase Messaging transport are owned by
+// domains/notifications/fcm_delivery.js. Payload builders remain close to the
+// business workflows that create them.
 
 async function sendScheduledReminderSummary(uid, items) {
   try {
