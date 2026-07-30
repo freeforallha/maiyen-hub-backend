@@ -14,6 +14,9 @@ const alarmSchedule = require(
 const alarmIncident = require(
   "../domains/alarm/alarm_incident",
 );
+const sensorAlarmEngine = require(
+  "../domains/alarm/sensor_alarm_engine",
+);
 
 const INDEX_PATH = path.resolve(__dirname, "..", "index.js");
 const AUTO_AWAY_PATH = path.resolve(
@@ -328,6 +331,25 @@ function createAlarmRuntime(initialNow) {
     },
   };
 
+  const sensorRuntime = sensorAlarmEngine.createSensorAlarmEngine({
+    db: {
+      ref() {
+        return {
+          async update() {},
+        };
+      },
+    },
+    getCachedAccountData: () => null,
+    normalizeAlarmIncidentItems:
+      alarmIncident.normalizeAlarmIncidentItems,
+    isSecurityDeviceType: alarmIncident.isSecurityDeviceType,
+    isEmergencyDeviceType: alarmIncident.isEmergencyDeviceType,
+    vibrationActiveWindowMs: 15 * 1000,
+    emergencyStatusHoldMs: 5 * 60 * 1000,
+    nowFn: () => clock.now,
+    log() {},
+  });
+
   const context = vm.createContext({
     console: {
       log() {},
@@ -346,17 +368,21 @@ function createAlarmRuntime(initialNow) {
     Set,
     ...scheduleRuntime,
     ...alarmIncident,
+    ...sensorRuntime,
+    normalizeHomeSecurityMode:
+      sensorAlarmEngine.normalizeHomeSecurityMode,
+    SAME_ALARM_EVENT_MIN_INTERVAL_MS:
+      sensorAlarmEngine.SAME_ALARM_EVENT_MIN_INTERVAL_MS,
+    SENSOR_EVENT_CATEGORY:
+      sensorAlarmEngine.SENSOR_EVENT_CATEGORY,
+    SENSOR_EVENT_SEVERITY:
+      sensorAlarmEngine.SENSOR_EVENT_SEVERITY,
   });
 
   const constNames = [
     "OFFLINE_TRANSIENT_ALARM_TTL_MS",
     "UNPROTECTED_TRANSIENT_REPLAY_WINDOW_MS",
-    "SAME_ALARM_EVENT_MIN_INTERVAL_MS",
-    "SENSOR_ALARM_DEBOUNCE_MAX_AGE_MS",
-    "SENSOR_ALARM_DEBOUNCE_MAX_ENTRIES",
     "VIBRATION_ACTIVE_WINDOW_MS",
-    "SENSOR_EVENT_CATEGORY",
-    "SENSOR_EVENT_SEVERITY",
   ];
 
   const deviceProfileFunctionNames = [
@@ -388,12 +414,15 @@ function createAlarmRuntime(initialNow) {
   ];
 
   const functionNames = [
-    "normalizeDeviceAlarmPolicy",
     "getCurrentEmergencyReason",
+    "resolveDeviceAlarmConfigurationForReceiver",
+  ];
+
+  const sensorFunctionNames = [
+    "normalizeDeviceAlarmPolicy",
     "normalizeHomeSecurityMode",
     "resolveAlarmActivationPriority",
     "buildAlarmTriggerFromSensorEvent",
-    "resolveDeviceAlarmConfigurationForReceiver",
     "getSensorAlarmEventCode",
     "getSensorAlarmDebounceMs",
     "cleanupSensorAlarmDebounceMap",
@@ -402,7 +431,6 @@ function createAlarmRuntime(initialNow) {
 
   const setupSource = [
     ...constNames.map(extractConstSource),
-    "const sensorAlarmEventDebounceMap = new Map();",
     ...deviceProfileFunctionNames.map(
       extractDeviceProfileFunctionSource,
     ),
@@ -413,11 +441,11 @@ function createAlarmRuntime(initialNow) {
       isSecurityDeviceType,
       isEmergencyDeviceType,
       ${functionNames.join(",\n      ")},
+      ${sensorFunctionNames.join(",\n      ")},
       DEVICE_ALARM_POLICY_DEFAULTS,
       OFFLINE_TRANSIENT_ALARM_TTL_MS,
       UNPROTECTED_TRANSIENT_REPLAY_WINDOW_MS,
       SAME_ALARM_EVENT_MIN_INTERVAL_MS,
-      sensorAlarmEventDebounceMap,
     };`,
   ].join("\n\n");
 
@@ -1246,9 +1274,10 @@ test("owned-home signature bỏ qua alarm cấp nhà nhưng vẫn theo dõi lị
     String,
     normalizeSecurityModeRepeatMinutes:
       alarmSchedule.normalizeSecurityModeRepeatMinutes,
+    normalizeHomeSecurityMode:
+      sensorAlarmEngine.normalizeHomeSecurityMode,
   });
   const setupSource = [
-    extractFunctionSource("normalizeHomeSecurityMode"),
     extractFunctionSource("getOwnedHomeAlarmControlSignature"),
     "this.__getOwnedHomeAlarmControlSignature = getOwnedHomeAlarmControlSignature;",
   ].join("\n\n");
