@@ -38,6 +38,9 @@ FILES=(
   "hub_update_push_localizations.js"
   "presence_recovery.js"
   "firebase_write_policy.js"
+  "domains/hub/hub_identity.js"
+  "domains/hub/hub_heartbeat.js"
+  "domains/shared/ordered_list_cleanup.js"
   "general_id.js"
   "package.json"
   "package-lock.json"
@@ -91,10 +94,14 @@ rollback_on_error() {
     echo "Deploy lỗi. Đang rollback production và updater..." >&2
 
     for file in "${FILES[@]}"; do
-      if [[ -f "${BACKUP_DIR}/runtime/${file}" ]]; then
-        cp -a "${BACKUP_DIR}/runtime/${file}" "${RUNTIME_DIR}/${file}"
+      runtime_file="${RUNTIME_DIR}/${file}"
+      backup_file="${BACKUP_DIR}/runtime/${file}"
+      mkdir -p "$(dirname "${runtime_file}")"
+
+      if [[ -f "${backup_file}" ]]; then
+        cp -a "${backup_file}" "${runtime_file}"
       else
-        rm -f "${RUNTIME_DIR}/${file}"
+        rm -f "${runtime_file}"
       fi
     done
 
@@ -209,8 +216,12 @@ install -d -m 0700 -o root -g root \
   "${BACKUP_DIR}/updater"
 
 for file in "${FILES[@]}"; do
-  if [[ -f "${RUNTIME_DIR}/${file}" ]]; then
-    cp -a "${RUNTIME_DIR}/${file}" "${BACKUP_DIR}/runtime/${file}"
+  runtime_file="${RUNTIME_DIR}/${file}"
+  backup_file="${BACKUP_DIR}/runtime/${file}"
+
+  if [[ -f "${runtime_file}" ]]; then
+    mkdir -p "$(dirname "${backup_file}")"
+    cp -a "${runtime_file}" "${backup_file}"
   fi
 done
 
@@ -238,6 +249,7 @@ echo "=== 3/6 STAGE + VALIDATE FILES ==="
 mkdir -p "${STAGE_DIR}"
 for file in "${FILES[@]}"; do
   staged="${STAGE_DIR}/${file}"
+  mkdir -p "$(dirname "${staged}")"
   cp "${SOURCE_DIR}/${file}" "${staged}"
 
   if [[ -f "${BACKUP_DIR}/runtime/${file}" ]]; then
@@ -258,6 +270,9 @@ done
 /usr/bin/node --check "${STAGE_DIR}/hub_update_push_localizations.js"
 /usr/bin/node --check "${STAGE_DIR}/presence_recovery.js"
 /usr/bin/node --check "${STAGE_DIR}/firebase_write_policy.js"
+/usr/bin/node --check "${STAGE_DIR}/domains/hub/hub_identity.js"
+/usr/bin/node --check "${STAGE_DIR}/domains/hub/hub_heartbeat.js"
+/usr/bin/node --check "${STAGE_DIR}/domains/shared/ordered_list_cleanup.js"
 /usr/bin/node --check "${STAGE_DIR}/general_id.js"
 /usr/bin/node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
   "${STAGE_DIR}/package.json"
@@ -295,7 +310,9 @@ systemctl daemon-reload
 
 echo "=== 5/6 ACTIVATE + RESTART BACKEND ==="
 for file in "${FILES[@]}"; do
-  mv "${STAGE_DIR}/${file}" "${RUNTIME_DIR}/${file}"
+  runtime_file="${RUNTIME_DIR}/${file}"
+  mkdir -p "$(dirname "${runtime_file}")"
+  mv "${STAGE_DIR}/${file}" "${runtime_file}"
 done
 
 systemctl restart "${SERVICE_NAME}"

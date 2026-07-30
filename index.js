@@ -32,6 +32,11 @@ const {
   presenceCleanupTargetSignature,
   updatePersistedTelemetrySnapshot,
 } = require("./firebase_write_policy");
+const { createHubIdentity } = require("./domains/hub/hub_identity");
+const { createHubHeartbeat } = require("./domains/hub/hub_heartbeat");
+const {
+  createOrderedListCleanup,
+} = require("./domains/shared/ordered_list_cleanup");
 
 const lastNotificationMap = {};
 const lastScheduleAlarmMap = {};
@@ -125,11 +130,6 @@ let chatUnreadMigrationPromise = null;
 const HOME_NOTIFICATION_STORAGE_LIMIT = 120;
 const DEVICE_NOTIFICATION_STORAGE_LIMIT = 100;
 const HOME_EVENT_STORAGE_LIMIT = 200;
-const ORDERED_LIST_CLEANUP_BATCH_SIZE = 20;
-const ORDERED_LIST_CLEANUP_MAX_PASSES = 20;
-
-const orderedListCleanupTimerMap = {};
-const orderedListCleanupInProgress = new Set();
 
 // ================= ALARM ESCALATION =================
 // Notification, đánh thức màn hình và còi vật lý kích hoạt ngay khi sự kiện
@@ -234,27 +234,12 @@ const alarmEventControlRuntimeMap = new Map();
 const SENSOR_ALARM_DEBOUNCE_MAX_AGE_MS = 5 * 60 * 1000;
 const SENSOR_ALARM_DEBOUNCE_MAX_ENTRIES = 5000;
 let alarmIncidentWatchdogTimer = null;
-function getPiSerial() {
-  try {
-    const cpuInfo = fs.readFileSync("/proc/cpuinfo", "utf8");
-    const match = cpuInfo.match(/Serial\s*:\s*(.+)/);
-
-    if (match && match[1]) {
-      return match[1].trim();
-    }
-
-    return "unknown_serial";
-  } catch (err) {
-    console.log("CPU INFO ERROR:", err);
-    return "unknown_serial";
-  }
-}
-
-const rawId = getPiSerial();
-
-const DEVICE_ID =
-  "dev_" +
-  crypto.createHash("sha256").update(rawId).digest("hex").slice(0, 16);
+const {
+  deviceId: DEVICE_ID,
+  hubName: HUB_NAME,
+  hubModel: HUB_MODEL,
+  readConnectedWifiInfo,
+} = createHubIdentity();
 
 console.log("🧠 DEVICE_ID:", DEVICE_ID);
 console.log(
@@ -263,114 +248,6 @@ console.log(
   `firmware=${SYSTEM_VERSION.hubFirmwareVersion}`,
   `protocol=${SYSTEM_VERSION.protocolVersion}`,
 );
-
-function readHubModel() {
-  const modelFiles = [
-    "/proc/device-tree/model",
-    "/sys/firmware/devicetree/base/model",
-  ];
-
-  for (const modelFile of modelFiles) {
-    try {
-      const value = fs
-        .readFileSync(modelFile, "utf8")
-        .replace(/\0/g, "")
-        .trim();
-
-      if (value) {
-        return value;
-      }
-    } catch (_) {
-      // Thử đường dẫn tiếp theo.
-    }
-  }
-
-  return "Raspberry Pi";
-}
-
-function tryExecText(command, args = []) {
-  try {
-    return String(
-      execFileSync(command, args, {
-        encoding: "utf8",
-        timeout: 1500,
-        stdio: ["ignore", "pipe", "ignore"],
-      }) || "",
-    ).trim();
-  } catch (_) {
-    return "";
-  }
-}
-
-function readConnectedWifiInfo() {
-  const iwgetidCandidates = [
-    "/usr/sbin/iwgetid",
-    "/sbin/iwgetid",
-    "iwgetid",
-  ];
-
-  for (const command of iwgetidCandidates) {
-    const ssid = tryExecText(command, ["-r"]);
-
-    if (ssid) {
-      return {
-        connected: true,
-        ssid,
-        interfaceName: "wlan0",
-      };
-    }
-  }
-
-  const nmcliOutput = tryExecText(
-    "/usr/bin/nmcli",
-    ["-t", "-f", "ACTIVE,SSID,DEVICE", "dev", "wifi"],
-  );
-
-  if (nmcliOutput) {
-    const activeLine = nmcliOutput
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line.startsWith("yes:"));
-
-    if (activeLine) {
-      const parts = activeLine.split(":");
-      const ssid = String(parts[1] || "")
-        .replace(/\\:/g, ":")
-        .trim();
-      const interfaceName = String(parts[2] || "wlan0").trim();
-
-      return {
-        connected: true,
-        ssid,
-        interfaceName,
-      };
-    }
-  }
-
-  let interfaceUp = false;
-
-  try {
-    interfaceUp = fs
-      .readFileSync("/sys/class/net/wlan0/operstate", "utf8")
-      .trim() === "up";
-  } catch (_) {
-    interfaceUp = false;
-  }
-
-  return {
-    connected: interfaceUp,
-    ssid: "",
-    interfaceName: "wlan0",
-  };
-}
-
-const HUB_NAME = String(
-  process.env.MAIYEN_HUB_NAME ||
-    process.env.SAFEHOME_HUB_NAME ||
-    os.hostname() ||
-    "MaiYen Hub",
-).trim() || "MaiYen Hub";
-const HUB_MODEL = readHubModel();
 
 // ================= FIREBASE =================
 const serviceAccount = require("./serviceAccount.json");
@@ -383,241 +260,39 @@ admin.initializeApp({
 
 const db = admin.database();
 
-async function trimOrderedListByTime(
-  listRef,
-  maxItems,
-) {
-  if (!listRef || maxItems <= 0) {
-    return;
-  }
+const { queueOrderedListCleanup } = createOrderedListCleanup({
+  batchSize: 20,
+  maxPasses: 20,
+  delayMs: 1500,
+  logError: (cleanupKey, error) => {
+    console.log(
+      "ORDERED LIST CLEANUP ERROR:",
+      cleanupKey,
+      error.message,
+    );
+  },
+});
 
-  const queryLimit =
-    maxItems + ORDERED_LIST_CLEANUP_BATCH_SIZE;
-
-  for (
-    let pass = 0;
-    pass < ORDERED_LIST_CLEANUP_MAX_PASSES;
-    pass++
-  ) {
-    const snap = await listRef
-      .orderByChild("time")
-      .limitToFirst(queryLimit)
-      .once("value");
-
-    const orderedKeys = [];
-
-    snap.forEach((childSnap) => {
-      if (childSnap.key) {
-        orderedKeys.push(childSnap.key);
-      }
-    });
-
-    if (orderedKeys.length <= maxItems) {
-      return;
-    }
-
-    const removeCount =
-      orderedKeys.length - maxItems;
-    const updates = {};
-
-    for (const key of orderedKeys.slice(0, removeCount)) {
-      updates[key] = null;
-    }
-
-    await listRef.update(updates);
-
-    // Nếu query trả về ít hơn giới hạn truy vấn thì danh sách đã
-    // được đưa về đúng maxItems trong lần này.
-    if (orderedKeys.length < queryLimit) {
-      return;
-    }
-  }
-}
-
-function queueOrderedListCleanup(
-  cleanupKey,
-  listRef,
-  maxItems,
-) {
-  if (!cleanupKey || !listRef || maxItems <= 0) {
-    return;
-  }
-
-  if (orderedListCleanupTimerMap[cleanupKey]) {
-    return;
-  }
-
-  orderedListCleanupTimerMap[cleanupKey] = setTimeout(
-    async () => {
-      delete orderedListCleanupTimerMap[cleanupKey];
-
-      if (orderedListCleanupInProgress.has(cleanupKey)) {
-        // Có ghi mới trong lúc cleanup đang chạy: xếp thêm một lượt
-        // ngắn sau đó thay vì chạy song song.
-        queueOrderedListCleanup(
-          cleanupKey,
-          listRef,
-          maxItems,
-        );
-        return;
-      }
-
-      orderedListCleanupInProgress.add(cleanupKey);
-
-      try {
-        await trimOrderedListByTime(
-          listRef,
-          maxItems,
-        );
-      } catch (error) {
-        console.log(
-          "ORDERED LIST CLEANUP ERROR:",
-          cleanupKey,
-          error.message,
-        );
-      } finally {
-        orderedListCleanupInProgress.delete(cleanupKey);
-      }
-    },
-    1500,
-  );
-}
-
-let hubHeartbeatTimer = null;
-let hubHeartbeatWriteInProgress = false;
-let hubHeartbeatWriteCount = 0;
 let mqttConnected = false;
 
-async function getHomesLinkedToThisHub() {
-  const snap = await db
-    .ref("system/devices_by_ieee")
-    .once("value");
-
-  const index = snap.val() || {};
-  const homes = new Map();
-
-  for (const value of Object.values(index)) {
-    const item = value || {};
-    const itemHubId = String(
-      item.deviceId || "",
-    ).trim();
-
-    if (itemHubId !== DEVICE_ID) {
-      continue;
-    }
-
-    const uid = String(item.uid || "").trim();
-    const homeId = String(item.homeId || "").trim();
-
-    if (!uid || !homeId) {
-      continue;
-    }
-
-    homes.set(
-      `${uid}|${homeId}`,
-      {
-        uid,
-        homeId,
-      },
-    );
-  }
-
-  return [...homes.values()];
-}
-
-async function writeHubHeartbeat() {
-  if (hubHeartbeatWriteInProgress) {
-    return;
-  }
-
-  hubHeartbeatWriteInProgress = true;
-
-  try {
-    const linkedHomes =
-      await getHomesLinkedToThisHub();
-
-    const now = Date.now();
-    const wifiInfo = readConnectedWifiInfo();
-
-    const heartbeat = {
-      hubId: DEVICE_ID,
-      hubName: HUB_NAME,
-      hubType: "raspberry_pi",
-      hubModel: HUB_MODEL,
-      status: "online",
-      mqttConnected,
-      wifiConnected: wifiInfo.connected,
-      wifiSsid: wifiInfo.ssid,
-      wifiInterface: wifiInfo.interfaceName,
-      backendPid: process.pid,
-      startedAt: HUB_HEARTBEAT_STARTED_AT,
-      lastHeartbeatAt: now,
-      heartbeatIntervalMs:
-        HUB_HEARTBEAT_INTERVAL_MS,
-      ...getSystemVersionHeartbeatFields(),
-      ...getHubUpdateHeartbeatFields(),
-    };
-
-    const updates = {
-      [`system/hubs/${DEVICE_ID}`]: heartbeat,
-    };
-
-    for (const item of linkedHomes) {
-      const basePath =
-        `accounts/${item.uid}/homes/${item.homeId}`;
-
-      // Lưu liên kết Hub trực tiếp trong nhà để app không phải
-      // đọc toàn bộ system/devices_by_ieee.
-      updates[`${basePath}/hubId`] = DEVICE_ID;
-      updates[`${basePath}/hubStatus`] = heartbeat;
-    }
-
-    await db.ref().update(updates);
-
-    hubHeartbeatWriteCount++;
-
-    // Chỉ ghi log lần đầu và mỗi 10 phút để tránh làm đầy journal.
-    if (
-      hubHeartbeatWriteCount === 1 ||
-      hubHeartbeatWriteCount % 10 === 0
-    ) {
-      console.log(
-        "💓 HUB HEARTBEAT:",
-        DEVICE_ID,
-        `homes=${linkedHomes.length}`,
-        `mqtt=${mqttConnected}`,
-      );
-    }
-  } catch (err) {
-    console.log(
-      "HUB HEARTBEAT ERROR:",
-      err.message,
-    );
-  } finally {
-    hubHeartbeatWriteInProgress = false;
-  }
-}
-
-function startHubHeartbeat() {
-  if (hubHeartbeatTimer) {
-    return;
-  }
-
-  void writeHubHeartbeat();
-
-  hubHeartbeatTimer = setInterval(
-    () => {
-      void writeHubHeartbeat();
-    },
-    HUB_HEARTBEAT_INTERVAL_MS,
-  );
-
-  console.log(
-    "💓 HUB HEARTBEAT STARTED:",
-    DEVICE_ID,
-    `interval=${HUB_HEARTBEAT_INTERVAL_MS / 1000}s`,
-  );
-}
+const {
+  getHomesLinkedToThisHub,
+  writeHubHeartbeat,
+  startHubHeartbeat,
+} = createHubHeartbeat({
+  db,
+  deviceId: DEVICE_ID,
+  hubName: HUB_NAME,
+  hubModel: HUB_MODEL,
+  startedAt: HUB_HEARTBEAT_STARTED_AT,
+  intervalMs: HUB_HEARTBEAT_INTERVAL_MS,
+  readConnectedWifiInfo,
+  getMqttConnected: () => mqttConnected,
+  getSystemVersionHeartbeatFields,
+  getHubUpdateHeartbeatFields,
+  processId: process.pid,
+  log: (...args) => console.log(...args),
+});
 
 // ================= MQTT =================
 const client = mqtt.connect("mqtt://localhost:1883");
