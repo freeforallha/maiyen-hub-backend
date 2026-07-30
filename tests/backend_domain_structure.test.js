@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, health, Auto Away, runtime, device and Alarm schedule domains", () => {
+test("composition root uses extracted Hub, health, Auto Away, runtime, device and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -23,6 +23,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(source, /createLocalRuntimeDomain/);
   assert.match(source, /domains\/devices\/device_profile/);
   assert.match(source, /domains\/alarm\/alarm_schedule/);
+  assert.match(source, /createAlarmIncidentDomain/);
+  assert.match(source, /domains\/alarm\/alarm_incident/);
   assert.match(
     source,
     /const crypto = require\(["']crypto["']\);/,
@@ -51,6 +53,12 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   );
   assert.doesNotMatch(source, /function resolveActiveDeviceSchedule\(/);
   assert.doesNotMatch(source, /function isScheduledAlarmSource\(/);
+  assert.doesNotMatch(source, /function normalizeAlarmIncidentItems\(/);
+  assert.doesNotMatch(source, /function getAlarmIncidentTargetKey\(/);
+  assert.doesNotMatch(source, /function getAlarmIncidentFlowType\(/);
+  assert.doesNotMatch(source, /function incidentRequiresPhysicalSiren\(/);
+  assert.doesNotMatch(source, /function isEmergencyDeviceType\(/);
+  assert.doesNotMatch(source, /function isSecurityDeviceType\(/);
   assert.match(
     source,
     /function asObject\(value\) \{[\s\S]*?!Array\.isArray\(value\)[\s\S]*?: \{\};[\s\S]*?\}/,
@@ -79,6 +87,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(
     deploySource,
     /domains\/alarm\/alarm_schedule\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/alarm\/alarm_incident\.js/,
   );
 });
 

@@ -46,6 +46,7 @@ FILES=(
   "domains/runtime/local_runtime.js"
   "domains/devices/device_profile.js"
   "domains/alarm/alarm_schedule.js"
+  "domains/alarm/alarm_incident.js"
   "general_id.js"
   "package.json"
   "package-lock.json"

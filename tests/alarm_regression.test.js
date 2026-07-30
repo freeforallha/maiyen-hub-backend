@@ -11,6 +11,9 @@ const {
 const alarmSchedule = require(
   "../domains/alarm/alarm_schedule",
 );
+const alarmIncident = require(
+  "../domains/alarm/alarm_incident",
+);
 
 const INDEX_PATH = path.resolve(__dirname, "..", "index.js");
 const AUTO_AWAY_PATH = path.resolve(
@@ -42,6 +45,17 @@ const ALARM_SCHEDULE_PATH = path.resolve(
 );
 const ALARM_SCHEDULE_SOURCE = fs.readFileSync(
   ALARM_SCHEDULE_PATH,
+  "utf8",
+);
+const ALARM_INCIDENT_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "alarm",
+  "alarm_incident.js",
+);
+const ALARM_INCIDENT_SOURCE = fs.readFileSync(
+  ALARM_INCIDENT_PATH,
   "utf8",
 );
 
@@ -148,6 +162,14 @@ function extractDeviceProfileFunctionSource(name) {
     DEVICE_PROFILE_SOURCE,
     name,
     "domains/devices/device_profile.js",
+  );
+}
+
+function extractAlarmIncidentFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    ALARM_INCIDENT_SOURCE,
+    name,
+    "domains/alarm/alarm_incident.js",
   );
 }
 
@@ -304,6 +326,7 @@ function createAlarmRuntime(initialNow) {
     JSON,
     Set,
     ...scheduleRuntime,
+    ...alarmIncident,
   });
 
   const constNames = [
@@ -347,7 +370,6 @@ function createAlarmRuntime(initialNow) {
 
   const functionNames = [
     "normalizeDeviceAlarmPolicy",
-    "isSecurityDeviceType",
     "getCurrentEmergencyReason",
     "normalizeHomeSecurityMode",
     "resolveAlarmActivationPriority",
@@ -362,12 +384,6 @@ function createAlarmRuntime(initialNow) {
   const setupSource = [
     ...constNames.map(extractConstSource),
     "const sensorAlarmEventDebounceMap = new Map();",
-    `function isEmergencyDeviceType(type) {
-      return [
-        "sos", "smoke", "heat", "carbon_monoxide",
-        "gas", "water_leak", "flood"
-      ].includes(String(type || "").trim());
-    }`,
     ...deviceProfileFunctionNames.map(
       extractDeviceProfileFunctionSource,
     ),
@@ -375,6 +391,8 @@ function createAlarmRuntime(initialNow) {
     `this.__alarm = {
       ${deviceProfileFunctionNames.join(",\n      ")},
       ${scheduleFunctionNames.join(",\n      ")},
+      isSecurityDeviceType,
+      isEmergencyDeviceType,
       ${functionNames.join(",\n      ")},
       DEVICE_ALARM_POLICY_DEFAULTS,
       OFFLINE_TRANSIENT_ALARM_TTL_MS,
@@ -2071,12 +2089,12 @@ test("notification báo lại chỉ giữ điều kiện vẫn còn nguy hiểm"
   });
 
   const source = [
-    extractFunctionSource("getAlarmIncidentItemIdentity"),
-    extractFunctionSource("normalizeAlarmIncidentItems"),
-    extractFunctionSource("getSecurityAlarmSourcePriority"),
-    extractFunctionSource("getSecurityAlarmConditionIdentity"),
-    extractFunctionSource("normalizePreferredSecurityIncidentItems"),
-    extractFunctionSource("filterCurrentSecurityAlarmDeliveryItems"),
+    extractAlarmIncidentFunctionSource("getAlarmIncidentItemIdentity"),
+    extractAlarmIncidentFunctionSource("normalizeAlarmIncidentItems"),
+    extractAlarmIncidentFunctionSource("getSecurityAlarmSourcePriority"),
+    extractAlarmIncidentFunctionSource("getSecurityAlarmConditionIdentity"),
+    extractAlarmIncidentFunctionSource("normalizePreferredSecurityIncidentItems"),
+    extractAlarmIncidentFunctionSource("filterCurrentSecurityAlarmDeliveryItems"),
     "this.__filter = filterCurrentSecurityAlarmDeliveryItems;",
   ].join("\n\n");
 
