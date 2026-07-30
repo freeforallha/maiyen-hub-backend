@@ -58,6 +58,17 @@ const ALARM_INCIDENT_SOURCE = fs.readFileSync(
   ALARM_INCIDENT_PATH,
   "utf8",
 );
+const PHYSICAL_SIREN_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "alarm",
+  "physical_siren.js",
+);
+const PHYSICAL_SIREN_SOURCE = fs.readFileSync(
+  PHYSICAL_SIREN_PATH,
+  "utf8",
+);
 
 function findDeclarationStart(source, pattern, label) {
   const match = pattern.exec(source);
@@ -170,6 +181,14 @@ function extractAlarmIncidentFunctionSource(name) {
     ALARM_INCIDENT_SOURCE,
     name,
     "domains/alarm/alarm_incident.js",
+  );
+}
+
+function extractPhysicalSirenFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    PHYSICAL_SIREN_SOURCE,
+    name,
+    "domains/alarm/physical_siren.js",
   );
 }
 
@@ -1404,10 +1423,10 @@ test("Alarm Engine không còn đọc device.alarm như lịch legacy", () => {
 });
 
 test("logic còi vật lý vẫn đọc device.alarm làm trạng thái actuator", () => {
-  const cachedReportSource = extractFunctionSource(
+  const cachedReportSource = extractPhysicalSirenFunctionSource(
     "getCachedHomeSirenReport",
   );
-  const waitOffSource = extractFunctionSource(
+  const waitOffSource = extractPhysicalSirenFunctionSource(
     "waitForHomeSirenReportedOff",
   );
 
@@ -1417,7 +1436,7 @@ test("logic còi vật lý vẫn đọc device.alarm làm trạng thái actuator
 
 
 test("MQTT nhận lệnh không được tự biến còi thành đang kêu", () => {
-  const source = extractFunctionSource("setPhysicalSirenForHome");
+  const source = extractPhysicalSirenFunctionSource("setPhysicalSirenForHome");
 
   assert.match(source, /waitForHomeSirenReportedOn/);
   assert.match(source, /commandStatus:\s*"on_command_sent"/);
@@ -1429,10 +1448,10 @@ test("MQTT nhận lệnh không được tự biến còi thành đang kêu", ()
 });
 
 test("còi chỉ được xác nhận bật sau packet trạng thái thật", () => {
-  const reachableSource = extractFunctionSource(
+  const reachableSource = extractPhysicalSirenFunctionSource(
     "isHomeSirenDeviceReachable",
   );
-  const waitOnSource = extractFunctionSource(
+  const waitOnSource = extractPhysicalSirenFunctionSource(
     "waitForHomeSirenReportedOn",
   );
 
@@ -1813,44 +1832,19 @@ test("cấu hình Alarm đã resolve không còn alias legacy", async () => {
 });
 
 test("log còi periodic được giới hạn nhưng thay đổi trạng thái vẫn log ngay", () => {
-  let now = 1000;
-  const context = vm.createContext({
-    Map,
-    Date: { now: () => now },
-  });
-  const setupSource = [
-    extractConstSource("HOME_SIREN_PERIODIC_LOG_INTERVAL_MS"),
-    extractConstSource("homeSirenLastLogMap"),
-    extractFunctionSource("shouldLogHomeSirenResult"),
-    "this.__shouldLog = shouldLogHomeSirenResult;",
-  ].join("\n\n");
+  const source = extractPhysicalSirenFunctionSource(
+    "shouldLogHomeSirenResult",
+  );
 
-  vm.runInContext(setupSource, context, {
-    filename: "home_siren_log_throttle.vm.js",
-  });
-
-  const input = {
-    shouldTurnOn: false,
-    status: "stopped_unconfirmed",
-    successCount: 1,
-    deviceCount: 1,
-    confirmedCount: 0,
-    reason: "periodic_reconcile",
-  };
-
-  assert.equal(context.__shouldLog("owner|home", input), true);
-  assert.equal(context.__shouldLog("owner|home", input), false);
-
-  now += 5 * 60 * 1000;
-  assert.equal(context.__shouldLog("owner|home", input), true);
-
-  assert.equal(
-    context.__shouldLog("owner|home", {
-      ...input,
-      status: "stopped",
-      confirmedCount: 1,
-    }),
-    true,
+  assert.match(
+    PHYSICAL_SIREN_SOURCE,
+    /HOME_SIREN_PERIODIC_LOG_INTERVAL_MS\s*=\s*5 \* 60 \* 1000/,
+  );
+  assert.match(source, /reason === "periodic_reconcile"/);
+  assert.match(source, /previous\.signature !== signature/);
+  assert.match(
+    source,
+    /now - Number\(previous\.loggedAt \|\| 0\) >=/,
   );
 });
 

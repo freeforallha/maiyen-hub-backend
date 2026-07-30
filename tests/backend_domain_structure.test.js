@@ -25,6 +25,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(source, /domains\/alarm\/alarm_schedule/);
   assert.match(source, /createAlarmIncidentDomain/);
   assert.match(source, /domains\/alarm\/alarm_incident/);
+  assert.match(source, /createPhysicalSirenDomain/);
+  assert.match(source, /domains\/alarm\/physical_siren/);
   assert.match(
     source,
     /const crypto = require\(["']crypto["']\);/,
@@ -59,6 +61,9 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.doesNotMatch(source, /function incidentRequiresPhysicalSiren\(/);
   assert.doesNotMatch(source, /function isEmergencyDeviceType\(/);
   assert.doesNotMatch(source, /function isSecurityDeviceType\(/);
+  assert.doesNotMatch(source, /async function setPhysicalSirenForHome\(/);
+  assert.doesNotMatch(source, /async function reconcilePhysicalSirenForHome\(/);
+  assert.doesNotMatch(source, /function startPhysicalSirenMonitor\(/);
   assert.match(
     source,
     /function asObject\(value\) \{[\s\S]*?!Array\.isArray\(value\)[\s\S]*?: \{\};[\s\S]*?\}/,
@@ -91,6 +96,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(
     deploySource,
     /domains\/alarm\/alarm_incident\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/alarm\/physical_siren\.js/,
   );
 });
 
