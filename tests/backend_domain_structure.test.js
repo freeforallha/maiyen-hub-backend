@@ -12,17 +12,27 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, health and cleanup domains", () => {
+test("composition root uses extracted Hub, health, Auto Away and cleanup domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
   assert.match(source, /createHubHeartbeat/);
   assert.match(source, /createOrderedListCleanup/);
   assert.match(source, /createSystemHealthDomain/);
+  assert.match(source, /createAutoAwayDomain/);
   assert.doesNotMatch(source, /function readConnectedWifiInfo\(/);
   assert.doesNotMatch(source, /async function getHomesLinkedToThisHub\(/);
   assert.doesNotMatch(source, /async function trimOrderedListByTime\(/);
   assert.doesNotMatch(source, /function evaluateHomeSystemHealth\(/);
+  assert.doesNotMatch(source, /async function checkAutoAwayHomes\(/);
+  assert.doesNotMatch(
+    source,
+    /function resolveAutoAwayParticipantSelection\(/,
+  );
+  assert.match(
+    source,
+    /function asObject\(value\) \{[\s\S]*?!Array\.isArray\(value\)[\s\S]*?: \{\};[\s\S]*?\}/,
+  );
 
   const deploySource = fs.readFileSync(
     path.join(ROOT, "scripts", "deploy_backend_production.sh"),
@@ -31,6 +41,10 @@ test("composition root uses extracted Hub, health and cleanup domains", () => {
   assert.match(
     deploySource,
     /domains\/system_health\/system_health\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/auto_away\/auto_away\.js/,
   );
 });
 

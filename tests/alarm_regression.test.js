@@ -10,7 +10,15 @@ const {
 } = require("../domains/system_health/system_health");
 
 const INDEX_PATH = path.resolve(__dirname, "..", "index.js");
+const AUTO_AWAY_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "auto_away",
+  "auto_away.js",
+);
 const INDEX_SOURCE = fs.readFileSync(INDEX_PATH, "utf8");
+const AUTO_AWAY_SOURCE = fs.readFileSync(AUTO_AWAY_PATH, "utf8");
 
 function findDeclarationStart(source, pattern, label) {
   const match = pattern.exec(source);
@@ -82,20 +90,32 @@ function scanBalancedBlock(source, startIndex, openChar, closeChar) {
   throw new Error(`Không tìm thấy dấu đóng ${closeChar}`);
 }
 
-function extractFunctionSource(name) {
+function extractFunctionSourceFrom(source, name, sourceLabel) {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const start = findDeclarationStart(
-    INDEX_SOURCE,
+    source,
     new RegExp(`(?:async\\s+)?function\\s+${escapedName}\\s*\\(`),
-    `hàm ${name}()`,
+    `hàm ${name}() trong ${sourceLabel}`,
   );
-  const paramsStart = INDEX_SOURCE.indexOf("(", start);
+  const paramsStart = source.indexOf("(", start);
   assert.notEqual(paramsStart, -1, `Hàm ${name}() không có danh sách tham số`);
-  const paramsEnd = scanBalancedBlock(INDEX_SOURCE, paramsStart, "(", ")");
-  const bodyStart = INDEX_SOURCE.indexOf("{", paramsEnd);
+  const paramsEnd = scanBalancedBlock(source, paramsStart, "(", ")");
+  const bodyStart = source.indexOf("{", paramsEnd);
   assert.notEqual(bodyStart, -1, `Hàm ${name}() không có thân hàm`);
-  const bodyEnd = scanBalancedBlock(INDEX_SOURCE, bodyStart, "{", "}");
-  return INDEX_SOURCE.slice(start, bodyEnd + 1);
+  const bodyEnd = scanBalancedBlock(source, bodyStart, "{", "}");
+  return source.slice(start, bodyEnd + 1);
+}
+
+function extractFunctionSource(name) {
+  return extractFunctionSourceFrom(INDEX_SOURCE, name, "backend/index.js");
+}
+
+function extractAutoAwayFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    AUTO_AWAY_SOURCE,
+    name,
+    "domains/auto_away/auto_away.js",
+  );
 }
 
 function extractConstSource(name) {
@@ -1790,8 +1810,8 @@ test("Auto Away cũ chưa có participantUids vẫn dùng toàn bộ thành viê
   const context = {};
 
   vm.runInNewContext(
-    `${extractFunctionSource("asObject")}\n` +
-      `${extractFunctionSource("resolveAutoAwayParticipantSelection")}\n` +
+    `${extractAutoAwayFunctionSource("asObject")}\n` +
+      `${extractAutoAwayFunctionSource("resolveAutoAwayParticipantSelection")}\n` +
       "this.resolveSelection = resolveAutoAwayParticipantSelection;",
     context,
   );
@@ -1814,8 +1834,8 @@ test("Auto Away chỉ dùng những thành viên được chọn còn thuộc nh
   const context = {};
 
   vm.runInNewContext(
-    `${extractFunctionSource("asObject")}\n` +
-      `${extractFunctionSource("resolveAutoAwayParticipantSelection")}\n` +
+    `${extractAutoAwayFunctionSource("asObject")}\n` +
+      `${extractAutoAwayFunctionSource("resolveAutoAwayParticipantSelection")}\n` +
       "this.resolveSelection = resolveAutoAwayParticipantSelection;",
     context,
   );
@@ -1848,8 +1868,8 @@ test("Auto Away fallback Owner khi toàn bộ người được chọn đã rờ
   const context = {};
 
   vm.runInNewContext(
-    `${extractFunctionSource("asObject")}\n` +
-      `${extractFunctionSource("resolveAutoAwayParticipantSelection")}\n` +
+    `${extractAutoAwayFunctionSource("asObject")}\n` +
+      `${extractAutoAwayFunctionSource("resolveAutoAwayParticipantSelection")}\n` +
       "this.resolveSelection = resolveAutoAwayParticipantSelection;",
     context,
   );
@@ -1873,7 +1893,7 @@ test("Auto Away fallback Owner khi toàn bộ người được chọn đã rờ
 });
 
 test("Auto Away chỉ dùng participantUids cho quyết định bật và tắt Mode", () => {
-  const source = extractFunctionSource("checkAutoAwayHomes");
+  const source = extractAutoAwayFunctionSource("checkAutoAwayHomes");
 
   assert.match(
     source,
@@ -1895,7 +1915,7 @@ test("Presence Summary tách riêng trạng thái nhóm thành viên Auto Away �
   const context = {};
 
   vm.runInNewContext(
-    `${extractFunctionSource("buildPresenceSummary")}\n` +
+    `${extractAutoAwayFunctionSource("buildPresenceSummary")}\n` +
       "this.buildSummary = buildPresenceSummary;",
     context,
   );
@@ -1935,7 +1955,7 @@ test("Presence Summary tách riêng trạng thái nhóm thành viên Auto Away �
     summary.participantCount,
   );
 
-  const source = extractFunctionSource("checkAutoAwayHomes");
+  const source = extractAutoAwayFunctionSource("checkAutoAwayHomes");
   assert.match(source, /const participantStatuses = Object\.entries\(/);
   assert.match(source, /participantSet\.has\(memberUid\)/);
   assert.match(source, /participantInsideCount/);

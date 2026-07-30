@@ -42,6 +42,7 @@ FILES=(
   "domains/hub/hub_heartbeat.js"
   "domains/shared/ordered_list_cleanup.js"
   "domains/system_health/system_health.js"
+  "domains/auto_away/auto_away.js"
   "general_id.js"
   "package.json"
   "package-lock.json"
