@@ -20,6 +20,11 @@ test("composition root uses extracted Hub, health, Auto Away and cleanup domains
   assert.match(source, /createOrderedListCleanup/);
   assert.match(source, /createSystemHealthDomain/);
   assert.match(source, /createAutoAwayDomain/);
+  assert.match(source, /createLocalRuntimeDomain/);
+  assert.match(
+    source,
+    /const crypto = require\(["']crypto["']\);/,
+  );
   assert.doesNotMatch(source, /function readConnectedWifiInfo\(/);
   assert.doesNotMatch(source, /async function getHomesLinkedToThisHub\(/);
   assert.doesNotMatch(source, /async function trimOrderedListByTime\(/);
@@ -29,6 +34,10 @@ test("composition root uses extracted Hub, health, Auto Away and cleanup domains
     source,
     /function resolveAutoAwayParticipantSelection\(/,
   );
+  assert.doesNotMatch(source, /function ensureLocalRuntimeDirectory\(/);
+  assert.doesNotMatch(source, /function enqueueOfflineOperation\(/);
+  assert.doesNotMatch(source, /function flushOfflineOperationQueue\(/);
+  assert.doesNotMatch(source, /function startFirebaseConnectionMonitor\(/);
   assert.match(
     source,
     /function asObject\(value\) \{[\s\S]*?!Array\.isArray\(value\)[\s\S]*?: \{\};[\s\S]*?\}/,
@@ -45,6 +54,10 @@ test("composition root uses extracted Hub, health, Auto Away and cleanup domains
   assert.match(
     deploySource,
     /domains\/auto_away\/auto_away\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/runtime\/local_runtime\.js/,
   );
 });
 

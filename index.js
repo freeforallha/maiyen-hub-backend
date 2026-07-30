@@ -1,9 +1,7 @@
 // 🔥 CORE
-const fs = require("fs");
 const mqtt = require("mqtt");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
-const path = require("path");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const {
@@ -37,6 +35,9 @@ const {
 const {
   createAutoAwayDomain,
 } = require("./domains/auto_away/auto_away");
+const {
+  createLocalRuntimeDomain,
+} = require("./domains/runtime/local_runtime");
 
 const lastNotificationMap = {};
 const lastScheduleAlarmMap = {};
@@ -45,38 +46,17 @@ const pendingScheduleReminderMap = {};
 const pendingScheduleReminderTimerMap = {};
 const alarmPauseExpiryTimerMap = new Map();
 
-// ================= OFFLINE-FIRST RUNTIME =================
-// Lưu snapshot cấu hình và hàng đợi sự cố ngay cạnh backend để Hub vẫn
-// quyết định Alarm/còi khi Internet hoặc Firebase tạm thời mất kết nối.
-// Ưu tiên tên biến môi trường MaiYen; tên SAFEHOME_* vẫn được đọc để
-// các Hub đã triển khai không mất cấu hình khi nâng cấp.
-const LOCAL_RUNTIME_DIR =
-  process.env.MAIYEN_LOCAL_RUNTIME_DIR ||
-  process.env.MAIYEN_RUNTIME_DIR ||
-  process.env.SAFEHOME_RUNTIME_DIR ||
-  path.join(__dirname, ".maiyen_runtime");
-const LOCAL_RUNTIME_SNAPSHOT_FILE = path.join(
-  LOCAL_RUNTIME_DIR,
-  "firebase_snapshot.json",
-);
-const LOCAL_OFFLINE_QUEUE_FILE = path.join(
-  LOCAL_RUNTIME_DIR,
-  "offline_queue.json",
-);
-const LOCAL_RUNTIME_SNAPSHOT_VERSION = 1;
-const OFFLINE_QUEUE_MAX_ITEMS = 1000;
-const OFFLINE_QUEUE_FLUSH_INTERVAL_MS = 15 * 1000;
-const LOCAL_RUNTIME_SNAPSHOT_SAVE_DELAY_MS = 10 * 1000;
+// Firebase connection state remains at the composition root because several
+// alarm and persistence flows need a fast synchronous connectivity guard.
+// The extracted local runtime domain owns snapshots, queue persistence and
+// connection-monitor timers, and updates this shared boolean through callbacks.
+let firebaseConnected = false;
+
+// Offline alarm demand state belongs to the Alarm domain. It remains in the
+// composition root while snapshot and queue persistence are extracted.
 const OFFLINE_TRANSIENT_ALARM_TTL_MS = 5 * 60 * 1000;
-const offlineOperationQueue = [];
 const offlineAlarmDemandMap = new Map();
 const offlineAlarmExpiryTimerMap = new Map();
-let firebaseConnected = false;
-let localRuntimeSnapshotSaveTimer = null;
-let offlineQueueSaveTimer = null;
-let offlineQueueFlushTimer = null;
-let offlineQueueFlushInProgress = false;
-let firebaseConnectionMonitorStarted = false;
 
 // ================= CO SENSOR FIREBASE THROTTLE =================
 // Một số cảm biến CO Tuya gửi MQTT gần như liên tục. Trạng thái nguy hiểm
@@ -1022,6 +1002,44 @@ const accountCache = new Map();
 const sharedByHomeCache = new Map();
 let backendDataCacheStarted = false;
 
+// ================= LOCAL RUNTIME DOMAIN =================
+// Owns the persisted Firebase snapshot, offline write/alarm queue and the
+// Firebase connectivity monitor. Business decisions remain injected from the
+// composition root so this module can be tested without loading the backend.
+const {
+  applyDeviceUpdateToLocalCache,
+  enqueueOfflineAlarmItem,
+  enqueueOfflineFirebaseUpdate,
+  flushOfflineOperationQueue,
+  loadLocalRuntimeState,
+  persistLocalRuntimeSnapshotNow,
+  persistOfflineQueueNow,
+  persistRuntimeBeforeExit,
+  scheduleLocalRuntimeSnapshotSave,
+  startFirebaseConnectionMonitor,
+  startOfflineQueueFlushTimer,
+} = createLocalRuntimeDomain({
+  db,
+  accountCache,
+  sharedByHomeCache,
+  deviceMap,
+  getFirebaseConnected: () => firebaseConnected,
+  setFirebaseConnected: (value) => {
+    firebaseConnected = value === true;
+  },
+  getAlarmIncidentItemIdentity,
+  getCachedHomeData,
+  isPersistentEmergencyIncidentItem,
+  isEmergencyIncidentItemStillUnsafe,
+  startOrMergeAlarmIncidents,
+  resumeOfflineAlarmDemandsFromSnapshot,
+  resumeActiveAlarmIncidents,
+  reconcileAllPhysicalSirens,
+  emergencyMergeWindowMs: EMERGENCY_MERGE_WINDOW_MS,
+  offlineTransientAlarmTtlMs: OFFLINE_TRANSIENT_ALARM_TTL_MS,
+  log: (...args) => console.log(...args),
+});
+
 // ================= SYSTEM HEALTH DOMAIN =================
 // Pin yếu, cảm biến/Hub/MQTT mất kết nối chỉ là system_warning.
 // Nhóm này không bao giờ tạo Alarm incident, fullscreen hoặc bật còi.
@@ -1129,541 +1147,6 @@ function localizePushMessageForUser(uid, rawMessage) {
   }
 
   return message;
-}
-
-function ensureLocalRuntimeDirectory() {
-  fs.mkdirSync(LOCAL_RUNTIME_DIR, {
-    recursive: true,
-    mode: 0o700,
-  });
-
-  try {
-    fs.chmodSync(LOCAL_RUNTIME_DIR, 0o700);
-  } catch (_) { }
-}
-
-function readLocalJsonFile(filePath, fallbackValue) {
-  try {
-    if (!fs.existsSync(filePath)) {
-      return fallbackValue;
-    }
-
-    const raw = fs.readFileSync(filePath, "utf8");
-    return JSON.parse(raw);
-  } catch (error) {
-    console.log(
-      "LOCAL RUNTIME READ ERROR:",
-      path.basename(filePath),
-      error.message,
-    );
-    return fallbackValue;
-  }
-}
-
-function writeLocalJsonFileAtomic(filePath, value) {
-  ensureLocalRuntimeDirectory();
-  const tempPath = `${filePath}.tmp`;
-  fs.writeFileSync(
-    tempPath,
-    JSON.stringify(value),
-    "utf8",
-  );
-  fs.renameSync(tempPath, filePath);
-
-  try {
-    fs.chmodSync(filePath, 0o600);
-  } catch (_) { }
-}
-
-function buildLocalOfflineAccountSnapshot(rawAccount) {
-  const account = rawAccount || {};
-  const safeHomes = {};
-
-  for (const [homeId, rawHome] of Object.entries(
-    account.homes || {},
-  )) {
-    const home = rawHome || {};
-    const safeDevices = {};
-
-    for (const [deviceId, rawDevice] of Object.entries(
-      home.devices || {},
-    )) {
-      const device = rawDevice || {};
-      const {
-        notifications: _ignoredNotifications,
-        ...safeDevice
-      } = device;
-
-      safeDevices[deviceId] = safeDevice;
-    }
-
-    safeHomes[homeId] = {
-      name: home.name || homeId,
-      securityMode: home.securityMode || "normal",
-      securityModeRepeatMinutes:
-        home.securityModeRepeatMinutes ?? 0,
-      alarmPauseToday: home.alarmPauseToday || null,
-      devices: safeDevices,
-    };
-  }
-
-  return {
-    homes: safeHomes,
-    alarmSettings: account.alarmSettings || {},
-    customRules: account.customRules || {},
-    sharedHomes: account.sharedHomes || {},
-  };
-}
-
-function persistLocalRuntimeSnapshotNow() {
-  try {
-    writeLocalJsonFileAtomic(
-      LOCAL_RUNTIME_SNAPSHOT_FILE,
-      {
-        version: LOCAL_RUNTIME_SNAPSHOT_VERSION,
-        savedAt: Date.now(),
-        accounts: Object.fromEntries(
-          Array.from(accountCache.entries()).map(
-            ([uid, account]) => [
-              uid,
-              buildLocalOfflineAccountSnapshot(account),
-            ],
-          ),
-        ),
-        sharedByHome: Object.fromEntries(
-          sharedByHomeCache.entries(),
-        ),
-        deviceMap,
-      },
-    );
-  } catch (error) {
-    console.log(
-      "LOCAL SNAPSHOT SAVE ERROR:",
-      error.message,
-    );
-  }
-}
-
-function scheduleLocalRuntimeSnapshotSave() {
-  if (localRuntimeSnapshotSaveTimer) {
-    return;
-  }
-
-  localRuntimeSnapshotSaveTimer = setTimeout(() => {
-    localRuntimeSnapshotSaveTimer = null;
-    persistLocalRuntimeSnapshotNow();
-  }, LOCAL_RUNTIME_SNAPSHOT_SAVE_DELAY_MS);
-}
-
-function persistOfflineQueueNow() {
-  try {
-    writeLocalJsonFileAtomic(
-      LOCAL_OFFLINE_QUEUE_FILE,
-      {
-        version: 1,
-        savedAt: Date.now(),
-        operations: offlineOperationQueue,
-      },
-    );
-  } catch (error) {
-    console.log(
-      "OFFLINE QUEUE SAVE ERROR:",
-      error.message,
-    );
-  }
-}
-
-function scheduleOfflineQueueSave() {
-  if (offlineQueueSaveTimer) {
-    return;
-  }
-
-  offlineQueueSaveTimer = setTimeout(() => {
-    offlineQueueSaveTimer = null;
-    persistOfflineQueueNow();
-  }, 250);
-}
-
-function loadLocalRuntimeState() {
-  ensureLocalRuntimeDirectory();
-
-  const snapshot = readLocalJsonFile(
-    LOCAL_RUNTIME_SNAPSHOT_FILE,
-    null,
-  );
-
-  if (
-    snapshot &&
-    snapshot.version === LOCAL_RUNTIME_SNAPSHOT_VERSION
-  ) {
-    for (const [uid, account] of Object.entries(
-      snapshot.accounts || {},
-    )) {
-      accountCache.set(uid, account || {});
-    }
-
-    for (const [homeId, members] of Object.entries(
-      snapshot.sharedByHome || {},
-    )) {
-      sharedByHomeCache.set(homeId, members || {});
-    }
-
-    for (const [deviceId, map] of Object.entries(
-      snapshot.deviceMap || {},
-    )) {
-      if (map?.uid && map?.homeId) {
-        deviceMap[deviceId] = {
-          uid: String(map.uid),
-          homeId: String(map.homeId),
-        };
-      }
-    }
-
-    console.log(
-      "💾 LOCAL FIREBASE SNAPSHOT LOADED:",
-      `accounts=${accountCache.size}`,
-      `homes=${sharedByHomeCache.size}`,
-      `devices=${Object.keys(deviceMap).length}`,
-      `savedAt=${Number(snapshot.savedAt || 0)}`,
-    );
-  }
-
-  const queueData = readLocalJsonFile(
-    LOCAL_OFFLINE_QUEUE_FILE,
-    null,
-  );
-  const storedOperations = Array.isArray(
-    queueData?.operations,
-  )
-    ? queueData.operations
-    : [];
-
-  offlineOperationQueue.splice(
-    0,
-    offlineOperationQueue.length,
-    ...storedOperations.slice(-OFFLINE_QUEUE_MAX_ITEMS),
-  );
-
-  if (offlineOperationQueue.length > 0) {
-    console.log(
-      "📥 OFFLINE QUEUE LOADED:",
-      offlineOperationQueue.length,
-    );
-  }
-}
-
-function applyDeviceUpdateToLocalCache(
-  ownerUid,
-  homeId,
-  deviceId,
-  updateData,
-) {
-  const cleanOwnerUid = String(ownerUid || "").trim();
-  const cleanHomeId = String(homeId || "").trim();
-  const cleanDeviceId = String(deviceId || "").trim();
-
-  if (!cleanOwnerUid || !cleanHomeId || !cleanDeviceId) {
-    return null;
-  }
-
-  const account = accountCache.get(cleanOwnerUid) || {};
-  const homes = account.homes || {};
-  const home = homes[cleanHomeId] || {};
-  const devices = home.devices || {};
-  const nextDevice = {
-    ...(devices[cleanDeviceId] || {}),
-    ...(updateData || {}),
-  };
-  const nextHome = {
-    ...home,
-    devices: {
-      ...devices,
-      [cleanDeviceId]: nextDevice,
-    },
-  };
-
-  accountCache.set(cleanOwnerUid, {
-    ...account,
-    homes: {
-      ...homes,
-      [cleanHomeId]: nextHome,
-    },
-  });
-
-  scheduleLocalRuntimeSnapshotSave();
-  return nextHome;
-}
-
-function getOfflineOperationIdentity(operation) {
-  if (operation?.type === "firebase_update") {
-    return `firebase_update|${String(operation.path || "")}`;
-  }
-
-  if (operation?.type === "alarm_item") {
-    const itemType = String(
-      operation.item?.type || "",
-    ).trim();
-    const isTransient = [
-      "sos",
-      "vibration",
-      "glass_break",
-      "motion",
-      "presence",
-    ].includes(itemType);
-    const timeBucket = isTransient
-      ? Math.floor(
-          Number(operation.queuedAt || 0) /
-          EMERGENCY_MERGE_WINDOW_MS,
-        )
-      : 0;
-
-    return [
-      "alarm_item",
-      String(operation.receiverUid || ""),
-      getAlarmIncidentItemIdentity(operation.item || {}),
-      String(timeBucket),
-    ].join("|");
-  }
-
-  return String(operation?.id || "");
-}
-
-function enqueueOfflineOperation(operation) {
-  if (!operation || !operation.type) {
-    return;
-  }
-
-  const normalized = {
-    ...operation,
-    id: operation.id || (
-      typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : crypto.randomBytes(16).toString("hex")
-    ),
-    queuedAt: Number(operation.queuedAt || Date.now()),
-  };
-  const identity = getOfflineOperationIdentity(normalized);
-  const existingIndex = offlineOperationQueue.findIndex(
-    (item) => getOfflineOperationIdentity(item) === identity,
-  );
-
-  if (
-    normalized.type === "firebase_update" &&
-    existingIndex >= 0
-  ) {
-    const existing = offlineOperationQueue[existingIndex];
-    offlineOperationQueue[existingIndex] = {
-      ...existing,
-      ...normalized,
-      data: {
-        ...(existing.data || {}),
-        ...(normalized.data || {}),
-      },
-      queuedAt: existing.queuedAt || normalized.queuedAt,
-    };
-  } else if (existingIndex < 0) {
-    offlineOperationQueue.push(normalized);
-  }
-
-  if (offlineOperationQueue.length > OFFLINE_QUEUE_MAX_ITEMS) {
-    offlineOperationQueue.splice(
-      0,
-      offlineOperationQueue.length - OFFLINE_QUEUE_MAX_ITEMS,
-    );
-  }
-
-  scheduleOfflineQueueSave();
-}
-
-function enqueueOfflineFirebaseUpdate(refPath, data) {
-  enqueueOfflineOperation({
-    type: "firebase_update",
-    path: String(refPath || "").trim(),
-    data: data || {},
-  });
-}
-
-function enqueueOfflineAlarmItem(receiverUid, item) {
-  enqueueOfflineOperation({
-    type: "alarm_item",
-    receiverUid: String(receiverUid || "").trim(),
-    item,
-  });
-}
-
-function isQueuedAlarmOperationStillRelevant(operation) {
-  const item = operation?.item || {};
-  const ownerUid = String(item.ownerUid || "").trim();
-  const homeId = String(item.homeId || "").trim();
-  const home = getCachedHomeData(ownerUid, homeId);
-  const queuedAt = Number(operation?.queuedAt || 0);
-  const type = String(item.type || "").trim();
-
-  if (!home) {
-    return true;
-  }
-
-  if (isPersistentEmergencyIncidentItem(item)) {
-    return isEmergencyIncidentItemStillUnsafe(home, item);
-  }
-
-  if (
-    [
-      "sos",
-      "vibration",
-      "glass_break",
-      "motion",
-      "presence",
-    ].includes(type)
-  ) {
-    return (
-      queuedAt > 0 &&
-      Date.now() - queuedAt <=
-        OFFLINE_TRANSIENT_ALARM_TTL_MS
-    );
-  }
-
-  return true;
-}
-
-async function flushOfflineOperationQueue() {
-  if (
-    !firebaseConnected ||
-    offlineQueueFlushInProgress ||
-    offlineOperationQueue.length === 0
-  ) {
-    return;
-  }
-
-  offlineQueueFlushInProgress = true;
-  let completed = 0;
-
-  try {
-    while (
-      firebaseConnected &&
-      offlineOperationQueue.length > 0
-    ) {
-      const alarmIndex = offlineOperationQueue.findIndex(
-        (item) => item?.type === "alarm_item",
-      );
-      const operationIndex = alarmIndex >= 0
-        ? alarmIndex
-        : 0;
-      const operation = offlineOperationQueue[operationIndex];
-
-      if (operation.type === "firebase_update") {
-        if (!operation.path) {
-          offlineOperationQueue.splice(operationIndex, 1);
-          continue;
-        }
-
-        await db
-          .ref(operation.path)
-          .update(operation.data || {});
-      } else if (operation.type === "alarm_item") {
-        if (
-          !operation.receiverUid ||
-          !operation.item ||
-          !isQueuedAlarmOperationStillRelevant(operation)
-        ) {
-          offlineOperationQueue.splice(operationIndex, 1);
-          continue;
-        }
-
-        await startOrMergeAlarmIncidents(
-          operation.receiverUid,
-          [operation.item],
-        );
-      }
-
-      offlineOperationQueue.splice(operationIndex, 1);
-      completed++;
-
-      if (completed >= 50) {
-        break;
-      }
-    }
-  } catch (error) {
-    console.log(
-      "OFFLINE QUEUE FLUSH PAUSED:",
-      error.message,
-    );
-  } finally {
-    offlineQueueFlushInProgress = false;
-    persistOfflineQueueNow();
-  }
-
-  if (completed > 0) {
-    console.log(
-      "📤 OFFLINE QUEUE FLUSHED:",
-      completed,
-      `remaining=${offlineOperationQueue.length}`,
-    );
-  }
-}
-
-function startOfflineQueueFlushTimer() {
-  if (offlineQueueFlushTimer) {
-    return;
-  }
-
-  offlineQueueFlushTimer = setInterval(() => {
-    void flushOfflineOperationQueue();
-  }, OFFLINE_QUEUE_FLUSH_INTERVAL_MS);
-}
-
-function startFirebaseConnectionMonitor() {
-  if (firebaseConnectionMonitorStarted) {
-    return;
-  }
-
-  firebaseConnectionMonitorStarted = true;
-
-  db.ref(".info/connected").on("value", (snapshot) => {
-    const nextConnected = snapshot.val() === true;
-    const changed = firebaseConnected !== nextConnected;
-    firebaseConnected = nextConnected;
-
-    if (changed) {
-      console.log(
-        nextConnected
-          ? "☁️ FIREBASE CONNECTED"
-          : "📴 FIREBASE OFFLINE - LOCAL ALARM MODE",
-      );
-    }
-
-    if (!nextConnected) {
-      void resumeOfflineAlarmDemandsFromSnapshot().catch((error) => {
-        console.log(
-          "OFFLINE ALARM RESUME ERROR:",
-          error.message,
-        );
-      });
-      return;
-    }
-
-    scheduleLocalRuntimeSnapshotSave();
-
-    setTimeout(() => {
-      void (async () => {
-        await flushOfflineOperationQueue();
-
-        try {
-          await resumeActiveAlarmIncidents();
-        } catch (error) {
-          console.log(
-            "ALARM RESUME AFTER RECONNECT ERROR:",
-            error.message,
-          );
-        }
-
-        await reconcileAllPhysicalSirens({
-          force: true,
-          reason: "firebase_reconnected",
-        });
-      })();
-    }, 1000);
-  });
 }
 
 function getCachedAccountsObject() {
@@ -14068,25 +13551,6 @@ async function init() {
 init().catch((error) => {
   console.log("BACKEND INIT ERROR:", error.message);
 });
-
-function persistRuntimeBeforeExit(signal) {
-  try {
-    if (localRuntimeSnapshotSaveTimer) {
-      clearTimeout(localRuntimeSnapshotSaveTimer);
-      localRuntimeSnapshotSaveTimer = null;
-    }
-
-    if (offlineQueueSaveTimer) {
-      clearTimeout(offlineQueueSaveTimer);
-      offlineQueueSaveTimer = null;
-    }
-
-    persistLocalRuntimeSnapshotNow();
-    persistOfflineQueueNow();
-  } finally {
-    console.log("💾 LOCAL RUNTIME SAVED:", signal);
-  }
-}
 
 process.once("SIGTERM", () => {
   hubUpdateBridge?.stop();

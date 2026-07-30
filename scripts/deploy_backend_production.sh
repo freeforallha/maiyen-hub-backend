@@ -43,6 +43,7 @@ FILES=(
   "domains/shared/ordered_list_cleanup.js"
   "domains/system_health/system_health.js"
   "domains/auto_away/auto_away.js"
+  "domains/runtime/local_runtime.js"
   "general_id.js"
   "package.json"
   "package-lock.json"
@@ -275,6 +276,9 @@ done
 /usr/bin/node --check "${STAGE_DIR}/domains/hub/hub_identity.js"
 /usr/bin/node --check "${STAGE_DIR}/domains/hub/hub_heartbeat.js"
 /usr/bin/node --check "${STAGE_DIR}/domains/shared/ordered_list_cleanup.js"
+/usr/bin/node --check "${STAGE_DIR}/domains/system_health/system_health.js"
+/usr/bin/node --check "${STAGE_DIR}/domains/auto_away/auto_away.js"
+/usr/bin/node --check "${STAGE_DIR}/domains/runtime/local_runtime.js"
 /usr/bin/node --check "${STAGE_DIR}/general_id.js"
 /usr/bin/node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
   "${STAGE_DIR}/package.json"

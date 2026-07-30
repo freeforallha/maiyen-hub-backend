@@ -21,14 +21,17 @@ test("backend package uses the MaiYen technical name", () => {
 });
 
 test("runtime prefers MAIYEN environment variables with legacy fallback", () => {
-  const indexSource = read("index.js");
+  const localRuntimeSource = read("domains/runtime/local_runtime.js");
   const hubIdentitySource = read("domains/hub/hub_identity.js");
   const versionSource = read("system_version.js");
   const contractSource = read("hub_update_contract.js");
   const bridgeSource = read("hub_update_bridge.js");
   const diagnosticSource = read("general_id.js");
 
-  assert.match(indexSource, /MAIYEN_RUNTIME_DIR[\s\S]*SAFEHOME_RUNTIME_DIR/);
+  assert.match(
+    localRuntimeSource,
+    /MAIYEN_RUNTIME_DIR[\s\S]*SAFEHOME_RUNTIME_DIR/,
+  );
   assert.match(
     hubIdentitySource,
     /MAIYEN_HUB_NAME[\s\S]*SAFEHOME_HUB_NAME/,
