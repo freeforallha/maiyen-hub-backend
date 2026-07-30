@@ -17,8 +17,19 @@ const AUTO_AWAY_PATH = path.resolve(
   "auto_away",
   "auto_away.js",
 );
+const DEVICE_PROFILE_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "devices",
+  "device_profile.js",
+);
 const INDEX_SOURCE = fs.readFileSync(INDEX_PATH, "utf8");
 const AUTO_AWAY_SOURCE = fs.readFileSync(AUTO_AWAY_PATH, "utf8");
+const DEVICE_PROFILE_SOURCE = fs.readFileSync(
+  DEVICE_PROFILE_PATH,
+  "utf8",
+);
 
 function findDeclarationStart(source, pattern, label) {
   const match = pattern.exec(source);
@@ -115,6 +126,14 @@ function extractAutoAwayFunctionSource(name) {
     AUTO_AWAY_SOURCE,
     name,
     "domains/auto_away/auto_away.js",
+  );
+}
+
+function extractDeviceProfileFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    DEVICE_PROFILE_SOURCE,
+    name,
+    "domains/devices/device_profile.js",
   );
 }
 
@@ -241,11 +260,14 @@ function createAlarmRuntime(initialNow) {
     "SENSOR_EVENT_SEVERITY",
   ];
 
-  const functionNames = [
+  const deviceProfileFunctionNames = [
     "isActiveSignal",
     "normalizeLockState",
     "isVibrationAction",
     "isGlassBreakAction",
+  ];
+
+  const functionNames = [
     "toMin",
     "isNowInRange",
     "isValidHHMM",
@@ -284,8 +306,12 @@ function createAlarmRuntime(initialNow) {
         "gas", "water_leak", "flood"
       ].includes(String(type || "").trim());
     }`,
+    ...deviceProfileFunctionNames.map(
+      extractDeviceProfileFunctionSource,
+    ),
     ...functionNames.map(extractFunctionSource),
     `this.__alarm = {
+      ${deviceProfileFunctionNames.join(",\n      ")},
       ${functionNames.join(",\n      ")},
       DEVICE_ALARM_POLICY_DEFAULTS,
       OFFLINE_TRANSIENT_ALARM_TTL_MS,
