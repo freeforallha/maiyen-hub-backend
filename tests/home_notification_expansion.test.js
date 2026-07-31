@@ -28,7 +28,17 @@ const membershipSource = fs.readFileSync(
   ),
   "utf8",
 );
-const workflowSource = `${indexSource}\n${activitySource}\n${membershipSource}`;
+const actionRequestsSource = fs.readFileSync(
+  path.join(
+    backendRoot,
+    "domains",
+    "home",
+    "home_action_requests.js",
+  ),
+  "utf8",
+);
+const workflowSource =
+  `${indexSource}\n${activitySource}\n${membershipSource}\n${actionRequestsSource}`;
 
 function expectAll(values) {
   for (const value of values) {
@@ -97,8 +107,8 @@ test("lỗi chuyển chủ nhà tạo thông báo thất bại có giới hạn 
 
 test("huỷ tạm dừng Alarm tạo thông báo hoạt động trở lại", () => {
   assert.match(
-    indexSource,
-    /if \(action === "remove"\)[\s\S]*type: "alarm_pause_cancelled"[\s\S]*cancelled_early/,
+    actionRequestsSource,
+    /action === "remove"[\s\S]*type: "alarm_pause_cancelled"[\s\S]*cancelled_early/,
   );
 });
 

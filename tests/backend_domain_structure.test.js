@@ -22,6 +22,8 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.match(source, /domains\/home\/home_status_aggregation/);
   assert.match(source, /createHomeMembershipDomain/);
   assert.match(source, /domains\/home\/home_membership/);
+  assert.match(source, /createHomeActionRequestDomain/);
+  assert.match(source, /domains\/home\/home_action_requests/);
   assert.match(source, /createFcmDeliveryDomain/);
   assert.match(source, /domains\/notifications\/fcm_delivery/);
   assert.match(source, /createScheduledReminderDomain/);
@@ -89,6 +91,12 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.doesNotMatch(source, /async function handleTransferOwnerAcceptRequest\(/);
   assert.doesNotMatch(source, /function normalizeHomeOrder\(/);
   assert.doesNotMatch(source, /const transferOwnerAcceptInProgress/);
+  assert.doesNotMatch(source, /async function handleAlarmPauseRequest\(/);
+  assert.doesNotMatch(source, /async function handleAlarmPauseAccountChanged\(/);
+  assert.doesNotMatch(source, /async function handleHomeSirenActionRequest\(/);
+  assert.doesNotMatch(source, /async function handleAlarmIncidentActionRequest\(/);
+  assert.doesNotMatch(source, /const homeSirenActionInProgress/);
+  assert.doesNotMatch(source, /const alarmIncidentActionInProgress/);
   assert.doesNotMatch(source, /async function addHomeNotificationToHomeRecipients\(/);
   assert.doesNotMatch(source, /const homeNotificationRequestInProgress/);
   assert.doesNotMatch(source, /db\.ref\("home_notification_requests"\)\.on/);

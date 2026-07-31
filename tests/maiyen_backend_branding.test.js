@@ -68,6 +68,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const homeMembershipSource = read(
     "domains/home/home_membership.js",
   );
+  const homeActionRequestsSource = read(
+    "domains/home/home_action_requests.js",
+  );
   const presenceSessionSource = read(
     "domains/presence/presence_session.js",
   );
@@ -110,6 +113,14 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.match(homeMembershipSource, /createHomeMembershipDomain/);
   assert.doesNotMatch(
     homeMembershipSource,
+    /SAFEHOME|SafeHome|safehome/,
+  );
+  assert.match(
+    homeActionRequestsSource,
+    /createHomeActionRequestDomain/,
+  );
+  assert.doesNotMatch(
+    homeActionRequestsSource,
     /SAFEHOME|SafeHome|safehome/,
   );
   assert.doesNotMatch(presenceSessionSource, /function getSafeHome/);
