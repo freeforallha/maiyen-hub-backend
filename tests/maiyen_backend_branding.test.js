@@ -59,6 +59,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const reminderSource = read(
     "domains/notifications/scheduled_reminder.js",
   );
+  const homeActivitySource = read(
+    "domains/notifications/home_activity.js",
+  );
 
   assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
   assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
@@ -75,6 +78,8 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.doesNotMatch(fcmDeliverySource, /function buildSafeHome/);
   assert.doesNotMatch(reminderSource, /function getSafeHome/);
   assert.doesNotMatch(reminderSource, /function buildSafeHome/);
+  assert.doesNotMatch(homeActivitySource, /function getSafeHome/);
+  assert.doesNotMatch(homeActivitySource, /function buildSafeHome/);
   assert.doesNotMatch(source, /SAFEHOME BACKEND READY/);
   assert.match(read("general_id.js"), /MAIYEN HUB DIAGNOSTIC REPORT/);
 });

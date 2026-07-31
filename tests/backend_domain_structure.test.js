@@ -22,6 +22,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device, n
   assert.match(source, /domains\/notifications\/fcm_delivery/);
   assert.match(source, /createScheduledReminderDomain/);
   assert.match(source, /domains\/notifications\/scheduled_reminder/);
+  assert.match(source, /createHomeActivityDomain/);
+  assert.match(source, /domains\/notifications\/home_activity/);
   assert.match(source, /createSystemHealthDomain/);
   assert.match(source, /createAutoAwayDomain/);
   assert.match(source, /createLocalRuntimeDomain/);
@@ -49,6 +51,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device, n
   assert.doesNotMatch(source, /function queueScheduledReminder\(/);
   assert.doesNotMatch(source, /function sendScheduledNotification\(/);
   assert.doesNotMatch(source, /function checkScheduledNotifications\(/);
+  assert.doesNotMatch(source, /async function addHomeNotificationFromBackend\(/);
+  assert.doesNotMatch(source, /async function addHomeNotificationToHomeRecipients\(/);
+  assert.doesNotMatch(source, /const homeNotificationRequestInProgress/);
+  assert.doesNotMatch(source, /db\.ref\("home_notification_requests"\)\.on/);
   assert.doesNotMatch(source, /async function getHomesLinkedToThisHub\(/);
   assert.doesNotMatch(source, /async function trimOrderedListByTime\(/);
   assert.doesNotMatch(source, /function evaluateHomeSystemHealth\(/);
@@ -124,6 +130,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device, n
   assert.match(
     deploySource,
     /domains\/notifications\/scheduled_reminder\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/notifications\/home_activity\.js/,
   );
   assert.match(
     deploySource,
