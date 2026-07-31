@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, Home Status, health, Presence, Auto Away, Security Mode, Firebase coordinator, Backend Lifecycle, runtime, device, notification and Alarm domains", () => {
+test("composition root uses extracted Hub, Home Status, health, Presence, Auto Away, Security Mode, Firebase coordinator, Backend Lifecycle, data-cache, runtime, device, notification and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -30,6 +30,8 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.match(source, /domains\/notifications\/scheduled_reminder/);
   assert.match(source, /createHomeActivityDomain/);
   assert.match(source, /domains\/notifications\/home_activity/);
+  assert.match(source, /createChatDeliveryDomain/);
+  assert.match(source, /domains\/notifications\/chat_delivery/);
   assert.match(source, /createSystemHealthDomain/);
   assert.match(source, /createPresenceSessionCoordinator/);
   assert.match(source, /domains\/presence\/presence_session/);
@@ -42,6 +44,10 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
     /offlineAlarmDemandMap,\s*clearOfflineAlarmDemand,/,
   );
   assert.match(source, /createLocalRuntimeDomain/);
+  assert.match(source, /createBackendDataCacheDomain/);
+  assert.match(source, /domains\/runtime\/backend_data_cache/);
+  assert.match(source, /startBackendDataCache/);
+  assert.match(source, /stopBackendDataCache/);
   assert.match(source, /createFirebaseRequestCoordinator/);
   assert.match(
     source,
@@ -88,6 +94,19 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.doesNotMatch(source, /function sendScheduledNotification\(/);
   assert.doesNotMatch(source, /function checkScheduledNotifications\(/);
   assert.doesNotMatch(source, /async function addHomeNotificationFromBackend\(/);
+  assert.doesNotMatch(source, /async function migrateLegacyChatUnreadCounters\(/);
+  assert.doesNotMatch(source, /function ensureChatUnreadCounterMigration\(/);
+  assert.doesNotMatch(source, /async function incrementChatUnreadCounter\(/);
+  assert.doesNotMatch(source, /async function sendChatNotificationPush\(/);
+  assert.doesNotMatch(source, /function buildUserDirectoryData\(/);
+  assert.doesNotMatch(source, /async function syncUserDirectoryEntry\(/);
+  assert.doesNotMatch(source, /async function removeUserDirectoryEntry\(/);
+  assert.doesNotMatch(source, /async function startBackendDataCache\(/);
+  assert.doesNotMatch(source, /function getCachedAccountsObject\(/);
+  assert.doesNotMatch(source, /function getCachedSharedByHomeObject\(/);
+  assert.doesNotMatch(source, /function getCachedAccountData\(/);
+  assert.doesNotMatch(source, /function getCachedHomeData\(/);
+  assert.doesNotMatch(source, /function getAlarmReceiverUidsForHome\(/);
   assert.doesNotMatch(source, /async function handleTransferOwnerAcceptRequest\(/);
   assert.doesNotMatch(source, /function normalizeHomeOrder\(/);
   assert.doesNotMatch(source, /const transferOwnerAcceptInProgress/);

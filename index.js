@@ -38,6 +38,9 @@ const {
   createHomeActivityDomain,
 } = require("./domains/notifications/home_activity");
 const {
+  createChatDeliveryDomain,
+} = require("./domains/notifications/chat_delivery");
+const {
   createHomeStatusAggregation,
 } = require("./domains/home/home_status_aggregation");
 const {
@@ -61,6 +64,10 @@ const {
 const {
   createLocalRuntimeDomain,
 } = require("./domains/runtime/local_runtime");
+const {
+  buildUserDirectoryData,
+  createBackendDataCacheDomain,
+} = require("./domains/runtime/backend_data_cache");
 const {
   createFirebaseRequestCoordinator,
 } = require("./domains/runtime/firebase_request_coordinator");
@@ -147,8 +154,6 @@ const emergencyStatusClearTimerMap = new Map();
 // Physical siren command/reconcile state now lives in the extracted domain.
 const VIBRATION_ACTIVE_WINDOW_MS = 15 * 1000;
 
-const userDirectoryCache = {};
-let chatUnreadMigrationPromise = null;
 let firebaseRequestCoordinator = null;
 
 // ================= LIMITED TIMELINES =================
@@ -588,7 +593,41 @@ function asObject(value) {
 // bằng child_added / child_changed / child_removed.
 const accountCache = new Map();
 const sharedByHomeCache = new Map();
-let backendDataCacheStarted = false;
+
+// ================= BACKEND DATA CACHE DOMAIN =================
+// Owns the canonical account/shared-home caches, userDirectory mirroring,
+// Firebase cache listeners and device-index bootstrap.
+const backendDataCacheDomain = createBackendDataCacheDomain({
+  db,
+  accountCache,
+  sharedByHomeCache,
+  deviceMap,
+  localActiveAlarmIncidentMap,
+  getFirebaseRequestCoordinator: () => firebaseRequestCoordinator,
+  scheduleLocalRuntimeSnapshotSave: (...args) => {
+    return scheduleLocalRuntimeSnapshotSave(...args);
+  },
+  persistLocalRuntimeSnapshotNow: (...args) => {
+    return persistLocalRuntimeSnapshotNow(...args);
+  },
+  handleAlarmRelevantAccountChange: (...args) => {
+    return handleAlarmRelevantAccountChange(...args);
+  },
+  handleAlarmPauseAccountChanged: (...args) => {
+    return handleAlarmPauseAccountChanged(...args);
+  },
+  log: (...args) => console.log(...args),
+});
+
+const {
+  getAlarmReceiverUidsForHome,
+  getCachedAccountData,
+  getCachedAccountsObject,
+  getCachedHomeData,
+  getCachedSharedByHomeObject,
+  startBackendDataCache,
+  stopBackendDataCache,
+} = backendDataCacheDomain;
 
 // ================= FCM DELIVERY DOMAIN =================
 // Owns active-session token selection, per-user localization, Firebase
@@ -605,6 +644,23 @@ const {
   localizeAlarmItemsJson,
   log: (...args) => console.log(...args),
 });
+
+// ================= CHAT DELIVERY DOMAIN =================
+// Owns unread-counter migration, idempotent increments and multi-device push.
+const chatDeliveryDomain = createChatDeliveryDomain({
+  db,
+  getCachedAccountsObject,
+  getCachedSharedByHomeObject,
+  sendPushToUser,
+  log: (...args) => console.log(...args),
+});
+
+const {
+  ensureChatUnreadCounterMigration,
+  incrementChatUnreadCounter,
+  sendChatNotificationPush,
+  stopChatDeliveryRuntime,
+} = chatDeliveryDomain;
 
 // ================= HOME ACTIVITY DOMAIN =================
 // Owns Home Notification persistence, recipient fanout, request validation,
@@ -974,254 +1030,6 @@ const {
   stopSecurityModeOrchestration,
 } = securityModeOrchestrationDomain;
 
-function getCachedAccountsObject() {
-  return Object.fromEntries(accountCache.entries());
-}
-
-function getCachedSharedByHomeObject() {
-  return Object.fromEntries(sharedByHomeCache.entries());
-}
-
-function buildUserDirectoryData(rawUser) {
-  const user = rawUser || {};
-  const profile = user.profile || {};
-
-  return {
-    email: String(user.email || "")
-      .trim()
-      .toLowerCase(),
-    name: String(
-      profile.name ||
-      user.name ||
-      "",
-    ).trim(),
-    photoUrl: String(
-      profile.photoUrl ||
-      user.photoUrl ||
-      "",
-    ).trim(),
-  };
-}
-
-async function syncUserDirectoryEntry(uid, rawUser) {
-  if (!uid) {
-    return;
-  }
-
-  const directoryData = buildUserDirectoryData(rawUser);
-  const signature = JSON.stringify(directoryData);
-
-  if (userDirectoryCache[uid] === signature) {
-    return;
-  }
-
-  userDirectoryCache[uid] = signature;
-
-  await db.ref(`userDirectory/${uid}`).set({
-    ...directoryData,
-    updatedAt: Date.now(),
-  });
-}
-
-async function removeUserDirectoryEntry(uid) {
-  if (!uid) {
-    return;
-  }
-
-  delete userDirectoryCache[uid];
-  await db.ref(`userDirectory/${uid}`).remove();
-}
-
-async function startBackendDataCache() {
-  if (backendDataCacheStarted) {
-    return;
-  }
-
-  backendDataCacheStarted = true;
-
-  const accountsRef = db.ref("accounts");
-  const sharedRef = db.ref("sharedByHome");
-
-  const upsertAccount = (snap) => {
-    const uid = String(snap.key || "").trim();
-
-    if (!uid) {
-      return;
-    }
-
-    const account = snap.val() || {};
-    const previousAccount = accountCache.get(uid) || null;
-
-    accountCache.set(uid, account);
-    scheduleLocalRuntimeSnapshotSave();
-
-    if (previousAccount) {
-      void handleAlarmRelevantAccountChange(
-        uid,
-        previousAccount,
-        account,
-      );
-      void handleAlarmPauseAccountChanged(snap);
-    }
-
-    void syncUserDirectoryEntry(uid, account).catch((error) => {
-      console.log(
-        "USER DIRECTORY SYNC ERROR:",
-        uid,
-        error.message,
-      );
-    });
-  };
-
-  const removeAccount = (snap) => {
-    const uid = String(snap.key || "").trim();
-
-    if (!uid) {
-      return;
-    }
-
-    accountCache.delete(uid);
-    scheduleLocalRuntimeSnapshotSave();
-
-    for (const key of Array.from(
-      localActiveAlarmIncidentMap.keys(),
-    )) {
-      if (key.startsWith(`${uid}|`)) {
-        localActiveAlarmIncidentMap.delete(key);
-      }
-    }
-
-    void removeUserDirectoryEntry(uid).catch((error) => {
-      console.log(
-        "USER DIRECTORY REMOVE ERROR:",
-        uid,
-        error.message,
-      );
-    });
-  };
-
-  const upsertSharedHome = (snap) => {
-    const homeId = String(snap.key || "").trim();
-
-    if (homeId) {
-      sharedByHomeCache.set(homeId, snap.val() || {});
-      scheduleLocalRuntimeSnapshotSave();
-    }
-  };
-
-  const removeSharedHome = (snap) => {
-    const homeId = String(snap.key || "").trim();
-
-    if (homeId) {
-      sharedByHomeCache.delete(homeId);
-      scheduleLocalRuntimeSnapshotSave();
-    }
-  };
-
-  const cacheListeners = [
-    {
-      key: "cache:accounts:child_added",
-      path: "accounts",
-      event: "child_added",
-      handler: upsertAccount,
-    },
-    {
-      key: "cache:accounts:child_changed",
-      path: "accounts",
-      event: "child_changed",
-      handler: upsertAccount,
-    },
-    {
-      key: "cache:accounts:child_removed",
-      path: "accounts",
-      event: "child_removed",
-      handler: removeAccount,
-    },
-    {
-      key: "cache:shared_by_home:child_added",
-      path: "sharedByHome",
-      event: "child_added",
-      handler: upsertSharedHome,
-    },
-    {
-      key: "cache:shared_by_home:child_changed",
-      path: "sharedByHome",
-      event: "child_changed",
-      handler: upsertSharedHome,
-    },
-    {
-      key: "cache:shared_by_home:child_removed",
-      path: "sharedByHome",
-      event: "child_removed",
-      handler: removeSharedHome,
-    },
-  ];
-
-  for (const listener of cacheListeners) {
-    firebaseRequestCoordinator.registerListener(listener);
-  }
-
-  // Bootstrap đúng một lần để các tác vụ khởi động có dữ liệu đầy đủ.
-  const [accountsSnap, sharedSnap, deviceIndexSnap] =
-    await Promise.all([
-      accountsRef.once("value"),
-      sharedRef.once("value"),
-      db.ref("system/devices_by_ieee").once("value"),
-    ]);
-
-  const accounts = accountsSnap.val() || {};
-  const sharedByHome = sharedSnap.val() || {};
-  const deviceIndex = deviceIndexSnap.val() || {};
-
-  const directorySyncTasks = [];
-
-  for (const [uid, account] of Object.entries(accounts)) {
-    const safeAccount = account || {};
-    accountCache.set(uid, safeAccount);
-    directorySyncTasks.push(
-      syncUserDirectoryEntry(uid, safeAccount),
-    );
-
-    // Giữ tương thích với thiết bị cũ chưa có bản ghi trong
-    // system/devices_by_ieee. Các thiết bị mới vẫn được cập nhật
-    // realtime từ device index listener ở trên.
-    const homes = safeAccount.homes || {};
-
-    for (const [homeId, rawHome] of Object.entries(homes)) {
-      const devices = rawHome?.devices || {};
-
-      for (const deviceId of Object.keys(devices)) {
-        if (!deviceMap[deviceId]) {
-          deviceMap[deviceId] = { uid, homeId };
-        }
-      }
-    }
-  }
-
-  for (const [homeId, members] of Object.entries(sharedByHome)) {
-    sharedByHomeCache.set(homeId, members || {});
-  }
-
-  for (const [deviceId, rawEntry] of Object.entries(deviceIndex)) {
-    const entry = rawEntry || {};
-    const uid = String(entry.uid || "").trim();
-    const homeId = String(entry.homeId || "").trim();
-
-    if (uid && homeId) {
-      deviceMap[deviceId] = { uid, homeId };
-    }
-  }
-
-  await Promise.all(directorySyncTasks);
-  persistLocalRuntimeSnapshotNow();
-
-  console.log(
-    "🗂️ BACKEND DATA CACHE READY:",
-    `accounts=${accountCache.size}`,
-    `homes=${sharedByHomeCache.size}`,
-    `devices=${Object.keys(deviceMap).length}`,
-  );
-}
 // ================= PUSH PAYLOADS =================
 // Token selection, localization and Firebase Messaging transport are owned by
 // domains/notifications/fcm_delivery.js. Payload builders remain close to the
@@ -1753,48 +1561,6 @@ async function sendUnprotectedSensorNotification(
 // Tất cả kiểm tra thường dùng cache; Firebase chỉ được đọc bù khi
 // event đến quá sớm và cache chưa kịp nhận incident vừa tạo.
 const alarmHomeValidationTimerMap = new Map();
-
-function getCachedAccountData(uid) {
-  return accountCache.get(String(uid || "").trim()) || null;
-}
-
-function getCachedHomeData(ownerUid, homeId) {
-  const ownerAccount = getCachedAccountData(ownerUid);
-
-  if (!ownerAccount) {
-    return null;
-  }
-
-  return ownerAccount?.homes?.[homeId] || null;
-}
-
-
-// Một nguồn duy nhất cho danh sách người nhận Alarm của Home:
-// Chủ nhà + các UID đang có trong sharedByHome/{homeId}.
-function getAlarmReceiverUidsForHome(ownerUid, homeId) {
-  const cleanOwnerUid = String(ownerUid || "").trim();
-  const cleanHomeId = String(homeId || "").trim();
-
-  if (!cleanOwnerUid || !cleanHomeId) {
-    return [];
-  }
-
-  const receiverUids = new Set([cleanOwnerUid]);
-  const sharedMembers =
-    sharedByHomeCache.get(cleanHomeId) || {};
-
-  for (const sharedUid of Object.keys(sharedMembers)) {
-    const cleanUid = String(sharedUid || "").trim();
-
-    // Không ghi incident vào một UID đã bị xóa khỏi /accounts.
-    if (cleanUid && getCachedAccountData(cleanUid)) {
-      receiverUids.add(cleanUid);
-    }
-  }
-
-  return Array.from(receiverUids);
-}
-
 
 function isAlarmPauseActiveFromData(pause) {
   if (!pause || typeof pause !== "object") {
@@ -6273,350 +6039,8 @@ async function cleanupLegacySecurityScheduleState() {
 // Security Mode transition and recovery orchestration is extracted to
 // domains/security/security_mode_orchestration.js.
 
-// ================= CHAT PUSH =================
-async function migrateLegacyChatUnreadCounters() {
-  const markerRef = db.ref(
-    "system/migrations/chatUnreadCounterV1",
-  );
-
-  const markerSnap = await markerRef.once("value");
-  const marker = asObject(markerSnap.val());
-
-  if (marker.completed === true) {
-    return;
-  }
-
-  const chatsSnap = await db
-    .ref("homeChats")
-    .once("value");
-
-  const accounts = asObject(getCachedAccountsObject());
-  const chats = asObject(chatsSnap.val());
-  const sharedByHome = asObject(
-    getCachedSharedByHomeObject(),
-  );
-  const homeOwners = new Map();
-
-  for (const [ownerUid, rawAccount] of Object.entries(accounts)) {
-    const account = asObject(rawAccount);
-    const ownedHomes = asObject(account.homes);
-
-    for (const homeId of Object.keys(ownedHomes)) {
-      homeOwners.set(homeId, ownerUid);
-    }
-  }
-
-  const updates = {};
-  const now = Date.now();
-  let migratedHomes = 0;
-  let migratedCounters = 0;
-
-  for (const [homeId, rawChat] of Object.entries(chats)) {
-    const ownerUid = String(
-      homeOwners.get(homeId) || "",
-    ).trim();
-
-    if (!ownerUid) {
-      continue;
-    }
-
-    const chat = asObject(rawChat);
-    const lastReadMap = asObject(chat.lastRead);
-    const messages = Object.entries(
-      asObject(chat.messages),
-    ).map(([messageId, rawMessage]) => {
-      const message = asObject(rawMessage);
-
-      return {
-        messageId,
-        senderUid: String(message.uid || "").trim(),
-        time: Number(message.time || 0),
-      };
-    }).filter((message) => {
-      return (
-        message.senderUid &&
-        Number.isFinite(message.time) &&
-        message.time > 0
-      );
-    });
-
-    const migratedThroughAt = messages.reduce(
-      (latest, message) => Math.max(latest, message.time),
-      0,
-    );
-
-    const recipients = new Set([ownerUid]);
-    const sharedMembers = asObject(sharedByHome[homeId]);
-
-    for (const sharedUid of Object.keys(sharedMembers)) {
-      const cleanUid = String(sharedUid || "").trim();
-
-      if (cleanUid) {
-        recipients.add(cleanUid);
-      }
-    }
-
-    for (const receiverUid of recipients) {
-      const lastReadAt = Number(
-        lastReadMap[receiverUid] || 0,
-      );
-
-      let count = 0;
-      let lastMessageAt = 0;
-      let lastMessageId = "";
-
-      for (const message of messages) {
-        if (
-          message.senderUid === receiverUid ||
-          message.time <= lastReadAt
-        ) {
-          continue;
-        }
-
-        count++;
-
-        if (message.time >= lastMessageAt) {
-          lastMessageAt = message.time;
-          lastMessageId = message.messageId;
-        }
-      }
-
-      updates[
-        `accounts/${receiverUid}/chatUnread/${homeId}`
-      ] = {
-        count,
-        lastReadAt:
-          Number.isFinite(lastReadAt) && lastReadAt > 0
-            ? lastReadAt
-            : 0,
-        lastMessageAt,
-        lastMessageId,
-        lastIncrementedMessageId: "",
-        migratedThroughAt,
-        updatedAt: now,
-      };
-
-      migratedCounters++;
-    }
-
-    migratedHomes++;
-  }
-
-  updates["system/migrations/chatUnreadCounterV1"] = {
-    completed: true,
-    completedAt: now,
-    migratedHomes,
-    migratedCounters,
-  };
-
-  await db.ref().update(updates);
-
-  console.log(
-    "💬 CHAT UNREAD MIGRATION COMPLETED:",
-    `homes=${migratedHomes}`,
-    `counters=${migratedCounters}`,
-  );
-}
-
-function ensureChatUnreadCounterMigration() {
-  if (!chatUnreadMigrationPromise) {
-    chatUnreadMigrationPromise =
-      migrateLegacyChatUnreadCounters().catch((error) => {
-        chatUnreadMigrationPromise = null;
-
-        console.log(
-          "CHAT UNREAD MIGRATION ERROR:",
-          error.message,
-        );
-      });
-  }
-
-  return chatUnreadMigrationPromise;
-}
-
-async function incrementChatUnreadCounter({
-  receiverUid,
-  homeId,
-  messageId,
-  messageTime,
-}) {
-  await ensureChatUnreadCounterMigration();
-
-  const cleanMessageId = String(messageId || "").trim();
-  const normalizedMessageTime = Number(messageTime || 0);
-
-  if (
-    !receiverUid ||
-    !homeId ||
-    !cleanMessageId ||
-    !Number.isFinite(normalizedMessageTime) ||
-    normalizedMessageTime <= 0
-  ) {
-    return 0;
-  }
-
-  const counterRef = db.ref(
-    `accounts/${receiverUid}/chatUnread/${homeId}`,
-  );
-
-  let incremented = false;
-
-  const result = await counterRef.transaction(
-    (rawCurrent) => {
-      incremented = false;
-
-      const current = rawCurrent &&
-        typeof rawCurrent === "object"
-          ? rawCurrent
-          : {};
-
-      const currentCount = Number(
-        typeof rawCurrent === "number"
-          ? rawCurrent
-          : current.count || 0,
-      );
-
-      const lastReadAt = Number(
-        current.lastReadAt || 0,
-      );
-
-      const migratedThroughAt = Number(
-        current.migratedThroughAt || 0,
-      );
-
-      const lastIncrementedMessageId = String(
-        current.lastIncrementedMessageId || "",
-      );
-
-      if (
-        cleanMessageId === lastIncrementedMessageId ||
-        normalizedMessageTime <= lastReadAt ||
-        normalizedMessageTime <= migratedThroughAt
-      ) {
-        return current;
-      }
-
-      incremented = true;
-
-      return {
-        ...current,
-        count: Math.min(
-          9999,
-          Number.isFinite(currentCount) && currentCount > 0
-            ? Math.floor(currentCount) + 1
-            : 1,
-        ),
-        lastMessageAt: Math.max(
-          Number(current.lastMessageAt || 0),
-          normalizedMessageTime,
-        ),
-        lastMessageId: cleanMessageId,
-        lastIncrementedMessageId: cleanMessageId,
-        updatedAt: Date.now(),
-      };
-    },
-  );
-
-  if (!result.committed || !incremented) {
-    return 0;
-  }
-
-  const counter = asObject(result.snapshot.val());
-  const count = Number(counter.count || 0);
-
-  return Number.isFinite(count) && count > 0
-    ? Math.floor(count)
-    : 0;
-}
-
-async function sendChatNotificationPush({
-  receiverUid,
-  ownerUid,
-  homeId,
-  homeName,
-  senderUid,
-  senderName,
-  messageId,
-  text,
-  unreadCount,
-}) {
-  if (unreadCount <= 0) {
-    return;
-  }
-
-  const cleanHomeName =
-    String(homeName || "").trim() || "HomeChat";
-
-  const cleanSenderName =
-    String(senderName || "").trim() ||
-    "Một thành viên";
-
-  const cleanText =
-    String(text || "").trim();
-
-  const title =
-    unreadCount > 1
-      ? `${cleanHomeName} · ${unreadCount} tin nhắn mới`
-      : cleanHomeName;
-
-  const body =
-    `${cleanSenderName}: ${cleanText}`;
-
-  const data = {
-    type: "chat",
-    title,
-    body,
-    ownerUid: String(ownerUid || ""),
-    homeId: String(homeId || ""),
-    homeName: cleanHomeName,
-    senderUid: String(senderUid || ""),
-    senderName: cleanSenderName,
-    messageId: String(messageId || ""),
-    unreadCount: String(unreadCount),
-    clickAction: "home_chat",
-  };
-
-  const pushResult = await sendPushToUser(
-    receiverUid,
-    {
-      data,
-
-      android: {
-        priority: "high",
-      },
-
-      apns: {
-        headers: {
-          "apns-priority": "10",
-        },
-        payload: {
-          aps: {
-            alert: {
-              title,
-              body,
-            },
-            sound: "default",
-            badge: unreadCount,
-            threadId: `home_chat_${homeId}`,
-          },
-        },
-      },
-    },
-    "CHAT",
-  );
-
-  if (pushResult.sent === 0) {
-    return;
-  }
-
-  console.log(
-    "💬 CHAT PUSH SENT:",
-    receiverUid,
-    homeId,
-    unreadCount,
-    `devices=${pushResult.sent}`,
-  );
-}
+// Chat unread migration and push delivery are extracted to
+// domains/notifications/chat_delivery.js.
 
 // ================= STARTUP HELPERS =================
 function startHubUpdateRuntime() {
@@ -6972,6 +6396,7 @@ addBackendComponent({
   key: "backend_data_cache",
   label: "BACKEND DATA CACHE",
   start: startBackendDataCache,
+  stop: stopBackendDataCache,
   startTimeoutMs: 5 * 1000,
   failureMode: "defer",
 });
@@ -7114,6 +6539,15 @@ addBackendComponent({
     );
   },
 });
+
+if (!registerBackendFinalizer({
+  key: "chat_delivery_runtime",
+  handler: stopChatDeliveryRuntime,
+})) {
+  throw new Error(
+    "Duplicate backend lifecycle finalizer: chat_delivery_runtime",
+  );
+}
 
 if (!registerBackendFinalizer({
   key: "home_action_request_runtime",
