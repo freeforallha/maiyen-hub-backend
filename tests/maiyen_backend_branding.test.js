@@ -56,6 +56,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const fcmDeliverySource = read(
     "domains/notifications/fcm_delivery.js",
   );
+  const reminderSource = read(
+    "domains/notifications/scheduled_reminder.js",
+  );
 
   assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
   assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
@@ -70,6 +73,8 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.doesNotMatch(persistenceSource, /function buildSafeHome/);
   assert.doesNotMatch(fcmDeliverySource, /function getSafeHome/);
   assert.doesNotMatch(fcmDeliverySource, /function buildSafeHome/);
+  assert.doesNotMatch(reminderSource, /function getSafeHome/);
+  assert.doesNotMatch(reminderSource, /function buildSafeHome/);
   assert.doesNotMatch(source, /SAFEHOME BACKEND READY/);
   assert.match(read("general_id.js"), /MAIYEN HUB DIAGNOSTIC REPORT/);
 });
@@ -78,7 +83,11 @@ test("legacy external app identifiers remain isolated from Linux identity", () =
   const source = read("index.js");
   const contractSource = read("hub_update_contract.js");
 
-  assert.match(source, /SAFEHOME_REMINDER/);
+  const reminderSource = read(
+    "domains/notifications/scheduled_reminder.js",
+  );
+
+  assert.match(reminderSource, /SAFEHOME_REMINDER/);
   assert.match(source, /safehome_sensor_notification_v1/);
   assert.match(source, /safehome_backend/);
   assert.match(contractSource, /maiyen_hub_backend/);

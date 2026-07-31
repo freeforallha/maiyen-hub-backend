@@ -94,6 +94,17 @@ const ALARM_INCIDENT_PERSISTENCE_SOURCE = fs.readFileSync(
   ALARM_INCIDENT_PERSISTENCE_PATH,
   "utf8",
 );
+const SCHEDULED_REMINDER_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "notifications",
+  "scheduled_reminder.js",
+);
+const SCHEDULED_REMINDER_SOURCE = fs.readFileSync(
+  SCHEDULED_REMINDER_PATH,
+  "utf8",
+);
 
 function findDeclarationStart(source, pattern, label) {
   const match = pattern.exec(source);
@@ -230,6 +241,14 @@ function extractAlarmIncidentPersistenceFunctionSource(name) {
     ALARM_INCIDENT_PERSISTENCE_SOURCE,
     name,
     "domains/alarm/alarm_incident_persistence.js",
+  );
+}
+
+function extractScheduledReminderFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    SCHEDULED_REMINDER_SOURCE,
+    name,
+    "domains/notifications/scheduled_reminder.js",
   );
 }
 
@@ -1537,7 +1556,9 @@ test("còi chỉ được xác nhận bật sau packet trạng thái thật", ()
 });
 
 test("Reminder chỉ dùng reminderMode rồi fallback home", () => {
-  const source = extractFunctionSource("checkScheduledNotifications");
+  const source = extractScheduledReminderFunctionSource(
+    "getReminderSchedules",
+  );
 
   assert.match(
     source,
@@ -1615,11 +1636,16 @@ test("Reminder dùng last_seen làm nguồn chính thay vì availability offline
 });
 
 test("Reminder có APNs alert để iOS hiện khi app background hoặc đã tắt", () => {
-  const source = extractFunctionSource("sendScheduledReminderSummary");
+  const source = extractScheduledReminderFunctionSource(
+    "sendScheduledReminderSummary",
+  );
 
   assert.match(source, /apns:\s*\{/);
   assert.match(source, /"apns-priority":\s*"10"/);
-  assert.match(source, /alert:\s*\{\s*title,\s*body,/);
+  assert.match(
+    source,
+    /alert:\s*\{[\s\S]*?title:\s*summary\.title,[\s\S]*?body:\s*summary\.body,/,
+  );
   assert.match(source, /category:\s*"SAFEHOME_REMINDER"/);
 });
 
@@ -1848,12 +1874,14 @@ test("sự kiện cảm biến hợp lệ đi thẳng vào Alarm Engine, không 
 
 
 test("Reminder debug mặc định bị tắt và chỉ bật bằng biến môi trường", () => {
-  const source = extractFunctionSource("checkScheduledNotifications");
-  const debugConst = extractConstSource("REMINDER_DEBUG_ENABLED");
+  const source = extractScheduledReminderFunctionSource(
+    "runScheduledNotificationCheck",
+  );
 
-  assert.match(debugConst, /MAIYEN_REMINDER_DEBUG/);
-  assert.match(debugConst, /SAFEHOME_REMINDER_DEBUG/);
-  assert.match(source, /if \(REMINDER_DEBUG_ENABLED\)/);
+  assert.match(INDEX_SOURCE, /MAIYEN_REMINDER_DEBUG/);
+  assert.match(INDEX_SOURCE, /SAFEHOME_REMINDER_DEBUG/);
+  assert.match(INDEX_SOURCE, /=== "true"/);
+  assert.match(source, /if \(debugEnabled\)/);
   assert.match(source, /REMINDER DEBUG/);
 });
 

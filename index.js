@@ -32,6 +32,9 @@ const {
   createFcmDeliveryDomain,
 } = require("./domains/notifications/fcm_delivery");
 const {
+  createScheduledReminderDomain,
+} = require("./domains/notifications/scheduled_reminder");
+const {
   createSystemHealthDomain,
 } = require("./domains/system_health/system_health");
 const {
@@ -89,8 +92,6 @@ const {
 const lastNotificationMap = {};
 const lastScheduleAlarmMap = {};
 let scheduledAlarmConfigurationRefreshTimer = null;
-const pendingScheduleReminderMap = {};
-const pendingScheduleReminderTimerMap = {};
 const alarmPauseExpiryTimerMap = new Map();
 
 // Firebase connection state remains at the composition root because several
@@ -155,9 +156,6 @@ const IOS_TIME_SENSITIVE_ALERTS_ENABLED =
 const IOS_CRITICAL_ALERTS_ENABLED =
   (process.env.MAIYEN_IOS_CRITICAL_ALERTS_ENABLED ||
     process.env.SAFEHOME_IOS_CRITICAL_ALERTS_ENABLED) === "true";
-const REMINDER_DEBUG_ENABLED =
-  (process.env.MAIYEN_REMINDER_DEBUG ||
-    process.env.SAFEHOME_REMINDER_DEBUG) === "true";
 
 // Giữ trạng thái Nguy hiểm thêm 5 phút kể từ lần kích hoạt mới nhất.
 // Người dùng có thể xác nhận sớm theo từng tài khoản ở phía app.
@@ -679,6 +677,26 @@ const {
   log: (...args) => console.log(...args),
 });
 
+// ================= SCHEDULED REMINDER DOMAIN =================
+// Owns Reminder schedule selection, per-minute dedupe, summary batching,
+// Home Notification creation and push delivery orchestration.
+const {
+  checkScheduledNotifications,
+  startScheduledReminderMonitor,
+  stopScheduledReminderMonitor,
+} = createScheduledReminderDomain({
+  db,
+  getCachedAccountsObject,
+  getCurrentHHMM,
+  getHomeNotificationSafety,
+  sendPushToUser,
+  addHomeNotificationFromBackend,
+  debugEnabled:
+    (process.env.MAIYEN_REMINDER_DEBUG ||
+      process.env.SAFEHOME_REMINDER_DEBUG) === "true",
+  log: (...args) => console.log(...args),
+});
+
 // ================= PHYSICAL SIREN DOMAIN =================
 // Owns Home siren command, confirmation, manual-mute and reconciliation
 // state. Firebase/MQTT/cache access is injected by the composition root.
@@ -1109,233 +1127,9 @@ function setPermitJoin(enable, time = 60) {
 // domains/notifications/fcm_delivery.js. Payload builders remain close to the
 // business workflows that create them.
 
-async function sendScheduledReminderSummary(uid, items) {
-  try {
-    if (!items || items.length === 0) return;
+// Scheduled Reminder payloads, summary batching, dedupe and schedule scans
+// are owned by domains/notifications/scheduled_reminder.js.
 
-    const uniqueItems = [];
-
-    for (const item of items) {
-      const exists = uniqueItems.some((oldItem) => {
-        return (
-          oldItem.homeId === item.homeId &&
-          oldItem.isSafe === item.isSafe &&
-          oldItem.reason === item.reason
-        );
-      });
-
-      if (!exists) {
-        uniqueItems.push(item);
-      }
-    }
-
-    if (uniqueItems.length === 0) return;
-
-    const allSafe = uniqueItems.every(
-      (item) => item.isSafe === true,
-    );
-
-    const unsafeItems = uniqueItems.filter(
-      (item) => item.isSafe !== true,
-    );
-
-    const reminderItems = [];
-
-    for (const item of uniqueItems) {
-      const rawItems = Array.isArray(item.reminderItems)
-        ? item.reminderItems
-        : [];
-
-      for (const reminderItem of rawItems) {
-        if (!reminderItem) continue;
-
-        const exists = reminderItems.some((oldItem) => {
-          return oldItem.homeId === reminderItem.homeId;
-        });
-
-        if (!exists) {
-          reminderItems.push(reminderItem);
-        }
-      }
-    }
-
-    const title =
-      uniqueItems.length === 1
-        ? uniqueItems[0].homeName || "Nhà"
-        : "Nhắc nhở MaiYen";
-
-    let body = "";
-
-    if (uniqueItems.length === 1) {
-      body = uniqueItems[0].text || "";
-    } else if (allSafe) {
-      body =
-        `${uniqueItems.length} nhà đã an toàn. ` +
-        `Hãy an tâm nghỉ ngơi.`;
-    } else {
-      body =
-        `${unsafeItems.length}/${uniqueItems.length} nhà ` +
-        `đang có vấn đề cần kiểm tra.`;
-    }
-
-    const reason = unsafeItems
-      .map((item) => {
-        const homeName = item.homeName || "Nhà";
-        const detail =
-          item.reason || "Có vấn đề cần kiểm tra";
-
-        return `${homeName}: ${detail}`;
-      })
-      .join("\n");
-
-    const pushResult = await sendPushToUser(
-      uid,
-      {
-        data: {
-          type: "schedule_notification",
-          title,
-          body,
-          homeId:
-            uniqueItems.length === 1
-              ? uniqueItems[0].homeId || ""
-              : "",
-          uid: uid || "",
-          isSafe: allSafe ? "true" : "false",
-          reason,
-          reminderItems: JSON.stringify(reminderItems),
-          clickAction: "schedule_SCREEN",
-        },
-
-        android: {
-          priority: "high",
-        },
-
-        // iOS không thể tự hiện data-only push khi app bị khóa hoặc đã tắt.
-        // Gửi kèm APNs alert để hệ thống hiển thị Reminder; khi app đang mở,
-        // foreground handler vẫn dùng local notification nên không bị trùng.
-        apns: {
-          headers: {
-            "apns-priority": "10",
-          },
-          payload: {
-            aps: {
-              alert: {
-                title,
-                body,
-              },
-              sound: "default",
-              category: "SAFEHOME_REMINDER",
-              "thread-id": "safehome_reminder",
-            },
-          },
-        },
-      },
-      "SCHEDULE SUMMARY",
-    );
-
-    if (pushResult.sent === 0) {
-      return;
-    }
-
-    console.log(
-      "🔔 SCHEDULE SUMMARY SENT:",
-      uid,
-      uniqueItems.length,
-      `devices=${pushResult.sent}`,
-    );
-  } catch (err) {
-    console.log(
-      "SCHEDULE SUMMARY ERROR:",
-      err.message,
-    );
-  }
-}
-
-function queueScheduledReminder(uid, item) {
-  if (!pendingScheduleReminderMap[uid]) {
-    pendingScheduleReminderMap[uid] = [];
-  }
-
-  pendingScheduleReminderMap[uid].push(item);
-
-  if (pendingScheduleReminderTimerMap[uid]) {
-    return;
-  }
-
-  pendingScheduleReminderTimerMap[uid] = setTimeout(
-    async () => {
-      const items =
-        pendingScheduleReminderMap[uid] || [];
-
-      delete pendingScheduleReminderMap[uid];
-      delete pendingScheduleReminderTimerMap[uid];
-
-      await sendScheduledReminderSummary(
-        uid,
-        items,
-      );
-    },
-    8000,
-  );
-}
-
-async function sendScheduledNotification(
-  uid,
-  homeId,
-  homeName,
-  text,
-  isSafe,
-  reason = "",
-  reminderItems = [],
-) {
-  try {
-    const now = Date.now();
-    const key =
-      `${uid}_${homeId}_${text}_${getCurrentHHMM()}`;
-
-    if (
-      lastNotificationMap[key] &&
-      now - lastNotificationMap[key] < 70 * 1000
-    ) {
-      return;
-    }
-
-    lastNotificationMap[key] = now;
-
-    await addHomeNotificationFromBackend({
-      uid,
-      homeId,
-      homeName,
-      type: "reminder_triggered",
-      category: "reminder",
-      severity: isSafe ? "success" : "warning",
-      title: isSafe
-        ? "Nhắc nhở: Nhà đã an toàn"
-        : "Nhắc nhở: Cần kiểm tra",
-      message: isSafe
-        ? "Nhà đang an toàn. Hãy an tâm nghỉ ngơi."
-        : `Cần kiểm tra: ${reason ||
-        "Nhà đang có vấn đề cần chú ý."
-        }`,
-      entityType: "home",
-      entityId: homeId,
-    });
-
-    queueScheduledReminder(uid, {
-      homeId,
-      homeName,
-      text,
-      isSafe,
-      reason,
-      reminderItems,
-    });
-  } catch (err) {
-    console.log(
-      "NOTIFICATION SEND ERROR:",
-      err.message,
-    );
-  }
-}
 function getTodayKey() {
   return getDateKeyFromTimestamp(Date.now());
 }
@@ -4982,143 +4776,7 @@ async function cleanupExpiredAlarmPause() {
     );
   }
 }
-async function checkScheduledNotifications() {
-  try {
-    const accounts = getCachedAccountsObject();
-    const current = getCurrentHHMM();
-
-
-    console.log("⏰ CHECK SCHEDULE:", current);
-
-    for (const [uid, user] of Object.entries(accounts)) {
-      const ownHomes = user.homes || {};
-      const sharedHomes = user.sharedHomes || {};
-      const homesToCheck = [];
-
-      for (const [homeId, home] of Object.entries(ownHomes)) {
-        homesToCheck.push({
-          receiverUid: uid,
-          ownerUid: uid,
-          homeId,
-          home,
-          source: "owner",
-        });
-      }
-
-      for (const [homeId, sharedInfo] of Object.entries(sharedHomes)) {
-        const ownerUid = sharedInfo?.ownerUid;
-        if (!ownerUid) continue;
-
-        const homeSnap = await db
-          .ref(`accounts/${ownerUid}/homes/${homeId}`)
-          .once("value");
-
-        const sharedHome = homeSnap.val();
-        if (!sharedHome) continue;
-
-        homesToCheck.push({
-          receiverUid: uid,
-          ownerUid,
-          homeId,
-          home: sharedHome,
-          source: "shared",
-        });
-      }
-
-      for (const item of homesToCheck) {
-        const { receiverUid, homeId, home, source } = item;
-
-        let notifications = [];
-
-        const customHomeRules =
-          user.customRules?.[homeId] || {};
-        const reminderMode = String(
-          customHomeRules.reminderMode || "home",
-        );
-
-        if (source === "shared" && reminderMode === "custom") {
-          const customRaw =
-            customHomeRules.notifications?.items || {};
-
-          notifications = Array.isArray(customRaw)
-            ? customRaw
-            : Object.values(customRaw);
-        } else {
-          const schedules = home.schedules || {};
-          const notificationsRaw = schedules.notifications || {};
-
-          notifications = Array.isArray(notificationsRaw)
-            ? notificationsRaw
-            : Object.values(notificationsRaw);
-        }
-
-        for (const item of notifications) {
-          if (REMINDER_DEBUG_ENABLED) {
-            console.log(
-              "🔎 REMINDER DEBUG:",
-              receiverUid,
-              homeId,
-              source,
-              JSON.stringify(item),
-              "CURRENT:",
-              current,
-            );
-          }
-
-          if (!item || item.enabled !== true) continue;
-          if (String(item.time || "").trim() !== current) continue;
-
-          const homeName = home.name || homeId;
-          const safety = getHomeNotificationSafety(home);
-
-          if (safety.safe) {
-            await sendScheduledNotification(
-              receiverUid,
-              homeId,
-              homeName,
-              `Nhà bạn đã an toàn, hãy an tâm đi ngủ.
-
-Nếu hôm nay bạn có kế hoạch ra/vào nhà trong thời gian Báo động hoạt động,
-hãy thiết lập "Tạm tắt Báo động hôm nay" để tránh làm phiền các thành viên khác.`,
-              true,
-              "",
-              [
-                {
-                  homeId,
-                  homeName,
-                  reasons: [],
-                },
-              ],
-            );
-          } else {
-            const detail = safety.unsafeDevices.slice(0, 3).join(", ");
-
-            await sendScheduledNotification(
-              receiverUid,
-              homeId,
-              homeName,
-              `⚠️ Nhà ${homeName} chưa an toàn: ${detail}
-
-Nếu hôm nay bạn có kế hoạch ra/vào nhà trong thời gian Báo động hoạt động,
-hãy thiết lập "Tạm tắt Báo động hôm nay" để tránh làm phiền các thành viên khác.`,
-              false,
-              detail,
-              [
-                {
-                  homeId,
-                  homeName,
-                  reasons: safety.unsafeDevices,
-                },
-              ],
-            );
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.log("SCHEDULE CHECK ERROR:", err.message);
-  }
-}
+// Scheduled Reminder checks are extracted to the Reminder domain.
 
 // ================= DEVICE NOTIFICATION LOG =================
 async function addHomeEvent(
@@ -7865,7 +7523,7 @@ async function init() {
   startSystemHealthMonitor();
 
   setInterval(cleanupExpiredAlarmPause, 60000);
-  setInterval(checkScheduledNotifications, 60000);
+  startScheduledReminderMonitor();
   // Kiểm tra lịch Alarm mỗi 10 giây để thời điểm bắt đầu lịch không bị
   // trễ tới gần một phút. Hàm chỉ dùng snapshot cache và gom theo receiver.
   setInterval(() => {
@@ -7894,12 +7552,14 @@ init().catch((error) => {
 
 process.once("SIGTERM", () => {
   hubUpdateBridge?.stop();
+  stopScheduledReminderMonitor();
   persistRuntimeBeforeExit("SIGTERM");
   process.exit(0);
 });
 
 process.once("SIGINT", () => {
   hubUpdateBridge?.stop();
+  stopScheduledReminderMonitor();
   persistRuntimeBeforeExit("SIGINT");
   process.exit(0);
 });

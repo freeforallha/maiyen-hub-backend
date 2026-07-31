@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, health, Auto Away, runtime, device and Alarm domains", () => {
+test("composition root uses extracted Hub, health, Auto Away, runtime, device, notification and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -20,6 +20,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(source, /createOrderedListCleanup/);
   assert.match(source, /createFcmDeliveryDomain/);
   assert.match(source, /domains\/notifications\/fcm_delivery/);
+  assert.match(source, /createScheduledReminderDomain/);
+  assert.match(source, /domains\/notifications\/scheduled_reminder/);
   assert.match(source, /createSystemHealthDomain/);
   assert.match(source, /createAutoAwayDomain/);
   assert.match(source, /createLocalRuntimeDomain/);
@@ -43,6 +45,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.doesNotMatch(source, /function getUserFcmTargets\(/);
   assert.doesNotMatch(source, /async function sendPushToUser\(/);
   assert.doesNotMatch(source, /function localizePushMessageForUser\(/);
+  assert.doesNotMatch(source, /function sendScheduledReminderSummary\(/);
+  assert.doesNotMatch(source, /function queueScheduledReminder\(/);
+  assert.doesNotMatch(source, /function sendScheduledNotification\(/);
+  assert.doesNotMatch(source, /function checkScheduledNotifications\(/);
   assert.doesNotMatch(source, /async function getHomesLinkedToThisHub\(/);
   assert.doesNotMatch(source, /async function trimOrderedListByTime\(/);
   assert.doesNotMatch(source, /function evaluateHomeSystemHealth\(/);
@@ -114,6 +120,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device an
   assert.match(
     deploySource,
     /domains\/notifications\/fcm_delivery\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/notifications\/scheduled_reminder\.js/,
   );
   assert.match(
     deploySource,
