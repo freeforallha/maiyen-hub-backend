@@ -17,6 +17,9 @@ const alarmIncident = require(
 const sensorAlarmEngine = require(
   "../domains/alarm/sensor_alarm_engine",
 );
+const {
+  buildNewDeviceRecord,
+} = require("../domains/devices/device_management");
 
 const INDEX_PATH = path.resolve(__dirname, "..", "index.js");
 const AUTO_AWAY_PATH = path.resolve(
@@ -1886,22 +1889,30 @@ test("Reminder debug mặc định bị tắt và chỉ bật bằng biến môi
 });
 
 test("pair thiết bị an ninh mới chỉ tạo alarmPolicy và alarmSchedules", () => {
-  const marker = "await db.ref(`accounts/${uid}/homes/${homeId}/devices/${ieee}`).set({";
-  const start = INDEX_SOURCE.indexOf(marker);
-  const end = INDEX_SOURCE.indexOf(
-    "await db.ref(`system/devices_by_ieee/${ieee}`).set({",
-    start,
-  );
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
-  const source = INDEX_SOURCE.slice(start, end);
+  const record = buildNewDeviceRecord({
+    ieee: "doorA",
+    deviceType: "door",
+    roomId: "roomA",
+    timestamp: 1,
+    isSecurityDeviceType: () => true,
+  });
 
-  assert.match(source, /alarmPolicy:\s*isSecurityDeviceType\(deviceType\)/);
-  assert.match(source, /alarmSchedules:\s*isSecurityDeviceType\(deviceType\)/);
-  assert.match(source, /default:\s*\{/);
-  assert.doesNotMatch(
-    source,
-    /alarm:\s*deviceType === "siren"[\s\S]*?isSecurityDeviceType/,
+  assert.deepEqual(record.alarmPolicy, {
+    enabled: true,
+    notificationEnabled: true,
+    physicalSirenEnabled: true,
+    fullscreenEnabled: true,
+  });
+  assert.deepEqual(record.alarmSchedules.default, {
+    enabled: true,
+    start: "23:00",
+    end: "06:00",
+    repeatMinutes: 0,
+    days: [1, 2, 3, 4, 5, 6, 7],
+  });
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(record, "alarm"),
+    false,
   );
 });
 

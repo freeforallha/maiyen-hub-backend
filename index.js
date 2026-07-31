@@ -61,6 +61,9 @@ const {
   createMqttDeviceIngestionDomain,
 } = require("./domains/devices/mqtt_device_ingestion");
 const {
+  createDeviceManagementDomain,
+} = require("./domains/devices/device_management");
+const {
   toMin,
   isValidHHMM,
   isNowInRange,
@@ -311,7 +314,6 @@ const client = mqtt.connect("mqtt://localhost:1883");
 
 // ================= DEVICE MAP =================
 let deviceMap = {};
-let pairingSession = null;
 
 // ================= TIME =================
 function getCurrentHHMM() {
@@ -943,51 +945,12 @@ async function removeUserDirectoryEntry(uid) {
   await db.ref(`userDirectory/${uid}`).remove();
 }
 
-function startDeviceMapListener() {
-  const indexRef = db.ref("system/devices_by_ieee");
-
-  const upsertDevice = (snap) => {
-    const deviceId = String(snap.key || "").trim();
-    const value = snap.val() || {};
-    const uid = String(value.uid || "").trim();
-    const homeId = String(value.homeId || "").trim();
-
-    if (!deviceId) {
-      return;
-    }
-
-    if (!uid || !homeId) {
-      delete deviceMap[deviceId];
-      devicePersistenceRuntimeMap.delete(deviceId);
-      return;
-    }
-
-    deviceMap[deviceId] = { uid, homeId };
-    scheduleLocalRuntimeSnapshotSave();
-  };
-
-  const removeDevice = (snap) => {
-    const deviceId = String(snap.key || "").trim();
-
-    if (deviceId) {
-      delete deviceMap[deviceId];
-      devicePersistenceRuntimeMap.delete(deviceId);
-      scheduleLocalRuntimeSnapshotSave();
-    }
-  };
-
-  indexRef.on("child_added", upsertDevice);
-  indexRef.on("child_changed", upsertDevice);
-  indexRef.on("child_removed", removeDevice);
-}
-
 async function startBackendDataCache() {
   if (backendDataCacheStarted) {
     return;
   }
 
   backendDataCacheStarted = true;
-  startDeviceMapListener();
 
   const accountsRef = db.ref("accounts");
   const sharedRef = db.ref("sharedByHome");
@@ -1136,20 +1099,6 @@ async function startBackendDataCache() {
     `devices=${Object.keys(deviceMap).length}`,
   );
 }
-// ================= PERMIT JOIN =================
-function setPermitJoin(enable, time = 60) {
-  return new Promise((resolve) => {
-    client.publish(
-      "zigbee2mqtt/bridge/request/permit_join",
-      JSON.stringify({ value: enable, time }),
-      () => {
-        console.log("permit_join =", enable);
-        resolve();
-      },
-    );
-  });
-}
-
 // ================= PUSH PAYLOADS =================
 // Token selection, localization and Firebase Messaging transport are owned by
 // domains/notifications/fcm_delivery.js. Payload builders remain close to the
@@ -7284,11 +7233,17 @@ async function init() {
 
   await runCloudInitStep(
     "OLD PAIR REQUEST CLEANUP",
-    async () => {
-      await db.ref("pair_requests").remove();
-      console.log("🧹 OLD PAIR REQUESTS CLEARED");
-    },
+    () => deviceManagementDomain.cleanupOldPairRequests(),
   );
+
+  try {
+    startDeviceManagement();
+  } catch (error) {
+    console.log(
+      "DEVICE MANAGEMENT START ERROR:",
+      error.message,
+    );
+  }
 
   await runCloudInitStep(
     "LEGACY SECURITY SCHEDULE CLEANUP",
@@ -7392,239 +7347,6 @@ async function init() {
     firebaseConnected ? "cloud" : "offline_local",
   );
 }
-
-init().catch((error) => {
-  console.log("BACKEND INIT ERROR:", error.message);
-});
-
-process.once("SIGTERM", () => {
-  hubUpdateBridge?.stop();
-  stopHomeActivityMonitor();
-  stopScheduledReminderMonitor();
-  persistRuntimeBeforeExit("SIGTERM");
-  process.exit(0);
-});
-
-process.once("SIGINT", () => {
-  hubUpdateBridge?.stop();
-  stopHomeActivityMonitor();
-  stopScheduledReminderMonitor();
-  persistRuntimeBeforeExit("SIGINT");
-  process.exit(0);
-});
-const deviceDeleteInProgress = new Set();
-
-db.ref("device_delete_requests").on("child_added", async (snap) => {
-  const requestId = String(snap.key || "").trim();
-  const req = snap.val() || {};
-
-  if (!requestId || req.status !== "pending") {
-    return;
-  }
-
-  const ownerUid = String(req.ownerUid || "").trim();
-  const homeId = String(req.homeId || "").trim();
-  const deviceId = String(req.deviceId || "").trim();
-  const requestedBy = String(req.requestedBy || "").trim();
-  const operationKey = `${ownerUid}|${homeId}|${deviceId}`;
-
-  if (deviceDeleteInProgress.has(operationKey)) {
-    return;
-  }
-
-  deviceDeleteInProgress.add(operationKey);
-
-  try {
-    if (!ownerUid || !homeId || !deviceId || !requestedBy) {
-      console.log(
-        "❌ DEVICE DELETE REQUEST INVALID:",
-        requestId,
-      );
-
-      await snap.ref.remove();
-      return;
-    }
-
-    const deviceRef = db.ref(
-      `accounts/${ownerUid}/homes/${homeId}/devices/${deviceId}`,
-    );
-
-    const deviceSnap = await deviceRef.once("value");
-    const storedDevice = deviceSnap.val() || {};
-    const deviceName = String(
-      storedDevice.name || req.deviceName || deviceId,
-    ).trim() || deviceId;
-    const deleteHome = getCachedHomeData(ownerUid, homeId) || {};
-    const deleteHomeName = String(
-      deleteHome.name || homeId,
-    ).trim() || homeId;
-
-    if (!deviceSnap.exists()) {
-      await db.ref().update({
-        [`system/devices_by_ieee/${deviceId}`]: null,
-        [`device_delete_requests/${requestId}`]: null,
-      });
-
-      delete deviceMap[deviceId];
-      devicePersistenceRuntimeMap.delete(deviceId);
-
-      await addHomeNotificationToHomeRecipients({
-        ownerUid,
-        homeId,
-        homeName: deleteHomeName,
-        type: "device_delete_succeeded",
-        category: "device",
-        severity: "success",
-        title: "Thiết bị đã được xoá",
-        message: `${deviceName}: Thiết bị đã được xoá`,
-        deviceId,
-        actorUid: requestedBy,
-        entityType: "device",
-        entityId: deviceId,
-        dedupeKey: `device_delete_succeeded|${deviceId}`,
-        dedupeMs: 30 * 1000,
-        data: { deviceName, requestedBy },
-      });
-
-      console.log(
-        "🧹 DEVICE ALREADY REMOVED:",
-        deviceId,
-      );
-      return;
-    }
-
-    console.log(
-      "🗑️ DELETE DEVICE:",
-      deviceId,
-      `owner=${ownerUid}`,
-      `requestedBy=${requestedBy}`,
-    );
-
-    await new Promise((resolve, reject) => {
-      client.publish(
-        "zigbee2mqtt/bridge/request/device/remove",
-        JSON.stringify({
-          id: deviceId,
-          force: true,
-        }),
-        (error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-
-          resolve();
-        },
-      );
-    });
-
-    // Cho Zigbee2MQTT đủ thời gian xoá thiết bị trước khi dọn Firebase.
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    const updates = {
-      [`accounts/${ownerUid}/homes/${homeId}/devices/${deviceId}`]: null,
-      [`system/devices_by_ieee/${deviceId}`]: null,
-      [`device_delete_requests/${requestId}`]: null,
-    };
-
-    // Dọn cấu hình Alarm riêng còn sót của Owner và các thành viên.
-    const affectedUids = new Set([ownerUid]);
-    const sharedMembers = sharedByHomeCache.get(homeId) || {};
-
-    for (const sharedUid of Object.keys(sharedMembers)) {
-      const cleanUid = String(sharedUid || "").trim();
-
-      if (cleanUid) {
-        affectedUids.add(cleanUid);
-      }
-    }
-
-    for (const affectedUid of affectedUids) {
-      updates[
-        `accounts/${affectedUid}/customRules/${homeId}/devices/${deviceId}`
-      ] = null;
-    }
-
-    await db.ref().update(updates);
-
-    delete deviceMap[deviceId];
-    devicePersistenceRuntimeMap.delete(deviceId);
-
-    await addHomeNotificationToHomeRecipients({
-      ownerUid,
-      homeId,
-      homeName: deleteHomeName,
-      type: "device_delete_succeeded",
-      category: "device",
-      severity: "success",
-      title: "Thiết bị đã được xoá",
-      message: `${deviceName}: Thiết bị đã được xoá`,
-      deviceId,
-      actorUid: requestedBy,
-      entityType: "device",
-      entityId: deviceId,
-      dedupeKey: `device_delete_succeeded|${deviceId}`,
-      dedupeMs: 30 * 1000,
-      data: { deviceName, requestedBy },
-    });
-
-    console.log(
-      "✅ DEVICE REMOVED:",
-      deviceId,
-      `request=${requestId}`,
-    );
-  } catch (error) {
-    console.log(
-      "DELETE DEVICE ERROR:",
-      requestId,
-      error.message,
-    );
-
-    try {
-      const failedHome = getCachedHomeData(ownerUid, homeId) || {};
-      const failedHomeName = String(
-        failedHome.name || homeId,
-      ).trim() || homeId;
-      const failedDeviceName = String(
-        req.deviceName || deviceId,
-      ).trim() || deviceId;
-
-      await addHomeNotificationToHomeRecipients({
-        ownerUid,
-        homeId,
-        homeName: failedHomeName,
-        type: "device_delete_failed",
-        category: "device",
-        severity: "warning",
-        title: "Không thể xoá thiết bị",
-        message: "Hãy thử lại thao tác xoá thiết bị.",
-        deviceId,
-        actorUid: requestedBy,
-        entityType: "device",
-        entityId: deviceId,
-        dedupeKey: `device_delete_failed|${deviceId}`,
-        dedupeMs: 30 * 1000,
-        data: {
-          deviceName: failedDeviceName,
-          requestedBy,
-          error: String(error.message || "").slice(0, 200),
-        },
-      });
-    } catch (notificationError) {
-      console.log(
-        "DEVICE DELETE FAILURE NOTIFICATION ERROR:",
-        notificationError.message,
-      );
-    }
-
-    // Xoá request lỗi để người dùng có thể gửi lại ngay.
-    try {
-      await snap.ref.remove();
-    } catch (_) {}
-  } finally {
-    deviceDeleteInProgress.delete(operationKey);
-  }
-});
 
 startHomeActivityMonitor();
 const transferOwnerAcceptInProgress = new Set();
@@ -9103,502 +8825,9 @@ client.on("close", () => {
   mqttConnected = false;
 });
 
-// ================= PAIRING =================
-db.ref("pair_requests").on("child_added", async (snap) => {
-  const data = snap.val();
-  const key = snap.key;
-
-  if (!data || !key) return;
-
-  const rawDuration = Number(data.duration);
-
-  const cleanupSeconds =
-    Number.isFinite(rawDuration) &&
-      rawDuration >= 1 &&
-      rawDuration <= 60
-      ? rawDuration
-      : 60;
-
-  setTimeout(async () => {
-    try {
-      if (pairingSession?.key === key) {
-        await setPermitJoin(false);
-        pairingSession = null;
-      }
-
-      await snap.ref.remove();
-
-      console.log("🧹 PAIR REQUEST REMOVED:", key);
-    } catch (err) {
-      console.log(
-        "PAIR REQUEST CLEANUP ERROR:",
-        err.message,
-      );
-    }
-  }, cleanupSeconds * 1000);
-
-  try {
-    const requestedBy = String(
-      data.requestedBy || "",
-    ).trim();
-
-    const ownerUid = String(
-      data.ownerUid || "",
-    ).trim();
-
-    const homeId = String(
-      data.homeId || "",
-    ).trim();
-
-    const hubId = String(
-      data.hubId || "",
-    ).trim();
-
-    const roomId = String(
-      data.roomId || "unassigned",
-    ).trim();
-
-    const duration = Number(data.duration);
-    const requestTime = Number(data.time);
-    const now = Date.now();
-
-    const invalidRequest =
-      data.active !== true ||
-      requestedBy.length === 0 ||
-      ownerUid.length === 0 ||
-      homeId.length === 0 ||
-      hubId.length === 0 ||
-      roomId.length === 0 ||
-      !Number.isFinite(duration) ||
-      duration < 1 ||
-      duration > 60 ||
-      !Number.isFinite(requestTime) ||
-      requestTime > now + 1000 ||
-      requestTime < now - 5 * 60 * 1000;
-
-    if (invalidRequest) {
-      console.log(
-        "❌ PAIR REQUEST REJECTED: INVALID DATA",
-        key,
-      );
-
-      await snap.ref.remove();
-      return;
-    }
-
-    // Request dành cho Raspberry Pi khác.
-    if (hubId !== DEVICE_ID.trim()) {
-      return;
-    }
-
-    const homeSnap = await db
-      .ref(`accounts/${ownerUid}/homes/${homeId}`)
-      .once("value");
-
-    if (!homeSnap.exists()) {
-      console.log(
-        "❌ PAIR REQUEST REJECTED: HOME NOT FOUND",
-        key,
-      );
-
-      await snap.ref.remove();
-      return;
-    }
-
-    let hasPermission = requestedBy === ownerUid;
-
-    if (!hasPermission) {
-      const sharedSnap = await db
-        .ref(
-          `accounts/${requestedBy}/sharedHomes/${homeId}`,
-        )
-        .once("value");
-
-      const sharedInfo = sharedSnap.val() || {};
-
-      hasPermission =
-        sharedInfo.ownerUid === ownerUid &&
-        sharedInfo.role === "admin";
-    }
-
-    if (!hasPermission) {
-      console.log(
-        "❌ PAIR REQUEST REJECTED: NO PERMISSION",
-        key,
-        requestedBy,
-      );
-
-      await snap.ref.remove();
-      return;
-    }
-
-    if (
-      roomId !== "unassigned" &&
-      !homeSnap
-        .child("rooms")
-        .child(roomId)
-        .exists()
-    ) {
-      console.log(
-        "❌ PAIR REQUEST REJECTED: ROOM NOT FOUND",
-        key,
-        roomId,
-      );
-
-      await snap.ref.remove();
-      return;
-    }
-
-    if (pairingSession?.key === key) {
-      return;
-    }
-
-    if (pairingSession != null) {
-      console.log(
-        "❌ PAIR REQUEST REJECTED: HUB BUSY",
-        key,
-      );
-
-      await snap.ref.remove();
-      return;
-    }
-
-    await setPermitJoin(true, duration);
-
-    pairingSession = {
-      key,
-      uid: ownerUid,
-      requestedBy,
-      homeId,
-      roomId,
-    };
-
-    console.log(
-      "🟢 PAIR START:",
-      key,
-      homeId,
-      requestedBy,
-    );
-  } catch (err) {
-    console.log(
-      "PAIR REQUEST PROCESS ERROR:",
-      err.message,
-    );
-
-    if (pairingSession?.key === key) {
-      try {
-        await setPermitJoin(false);
-      } catch (_) { }
-
-      pairingSession = null;
-    }
-
-    try {
-      await snap.ref.remove();
-    } catch (_) { }
-  }
-});
-
-db.ref("pair_requests").on("child_removed", (snap) => {
-  console.log("🧹 REQUEST REMOVED:", snap.key);
-});
-
-client.on("message", async (topic, msg) => {
-  try {
-    const data = JSON.parse(msg.toString());
-
-    // ===== DEVICE JOIN =====
-    if (topic === "zigbee2mqtt/bridge/event") {
-      const type = data?.type;
-      const payload = data?.data;
-
-      if (!payload || !pairingSession) return;
-
-      if (
-        type === "device_announce" ||
-        type === "device_interview" ||
-        type === "device_connected"
-      ) {
-        const ieee = payload.ieee_address;
-        if (!ieee) return;
-
-        const { uid, homeId, roomId } = pairingSession;
-
-        const snap = await db
-          .ref(`system/devices_by_ieee/${ieee}`)
-          .once("value");
-
-        const existing = snap.val();
-
-        if (existing?.uid && existing?.homeId) {
-          const oldRef = db.ref(
-            `accounts/${existing.uid}/homes/${existing.homeId}/devices/${ieee}`,
-          );
-
-          const snapOld = await oldRef.once("value");
-
-          if (snapOld.exists()) {
-            await oldRef.remove();
-          }
-        }
-
-        const deviceType = getDeviceTypeFromModel(
-          payload?.definition?.model,
-          payload?.definition?.description,
-          ieee,
-        );
-        const devicesSnap = await db
-          .ref(`accounts/${uid}/homes/${homeId}/devices`)
-          .once("value");
-
-        const devices = devicesSnap.val() || {};
-        const sameTypeDevices = Object.values(devices).filter((device) => {
-          return device?.type === deviceType;
-        });
-
-        let defaultBaseName = "Thiết bị chưa nhận diện";
-
-        switch (deviceType) {
-          case "door":
-            defaultBaseName = "Cửa Nhà";
-            break;
-
-          case "window":
-            defaultBaseName = "Cửa Sổ";
-            break;
-
-          case "gate":
-            defaultBaseName = "Cổng Nhà";
-            break;
-
-          case "door_lock":
-          case "lock":
-            defaultBaseName = "Khóa Cửa";
-            break;
-
-          case "motion":
-            defaultBaseName = "Giám sát chuyển động";
-            break;
-
-          case "presence":
-            defaultBaseName = "Giám sát hiện diện";
-            break;
-
-          case "vibration":
-            defaultBaseName = "Ghi nhận rung chấn";
-            break;
-
-          case "glass_break":
-            defaultBaseName = "Phát hiện kính vỡ";
-            break;
-
-          case "smoke":
-            defaultBaseName = "Báo cháy";
-            break;
-
-          case "heat":
-            defaultBaseName = "Cảnh báo nhiệt độ";
-            break;
-
-          case "carbon_monoxide":
-            defaultBaseName = "Cảnh báo khí CO";
-            break;
-
-          case "gas":
-            defaultBaseName = "Cảnh báo rò rỉ gas";
-            break;
-
-          case "water_leak":
-          case "flood":
-            defaultBaseName = "Cảnh báo ngập nước";
-            break;
-
-          case "temperature":
-            defaultBaseName = "Nhiệt độ và độ ẩm";
-            break;
-
-          case "sos":
-            defaultBaseName = "Nút SOS";
-            break;
-
-          case "smart_plug":
-            defaultBaseName = "Ổ cắm thông minh";
-            break;
-
-          case "power_monitor":
-            defaultBaseName = "Theo dõi điện năng";
-            break;
-
-          case "ups":
-            defaultBaseName = "Nguồn dự phòng";
-            break;
-
-          case "siren":
-            defaultBaseName = "Còi báo động";
-            break;
-
-          case "smart_valve":
-            defaultBaseName = "Van nước thông minh";
-            break;
-
-          case "camera":
-            defaultBaseName = "Camera";
-            break;
-
-          case "doorbell":
-            defaultBaseName = "Chuông cửa";
-            break;
-
-          case "keypad":
-            defaultBaseName = "Bàn phím an ninh";
-            break;
-
-          case "repeater":
-            defaultBaseName = "Bộ mở rộng sóng";
-            break;
-        }
-
-        // Thiết bị đầu tiên không có số. Từ thiết bị thứ hai mới dùng 2, 3...
-        // Đồng thời tránh trùng tên nếu một thiết bị cũ đã bị xóa hoặc đổi tên.
-        let defaultName = defaultBaseName;
-
-        if (sameTypeDevices.length > 0) {
-          const existingNames = new Set(
-            sameTypeDevices.map((device) => {
-              return String(device?.name || "").trim();
-            }),
-          );
-
-          let sequenceNumber = Math.max(2, sameTypeDevices.length + 1);
-
-          while (existingNames.has(`${defaultBaseName} ${sequenceNumber}`)) {
-            sequenceNumber += 1;
-          }
-
-          defaultName = `${defaultBaseName} ${sequenceNumber}`;
-        }
-        await db.ref(`accounts/${uid}/homes/${homeId}/devices/${ieee}`).set({
-          name: defaultName,
-          ieee,
-          type: deviceType,
-          roomId: roomId || "unassigned",
-          // Thiết bị an ninh mới chỉ dùng schema hiện hành. `alarm` được
-          // dành riêng cho trạng thái actuator của còi và sẽ xuất hiện khi
-          // Zigbee2MQTT báo trạng thái thật.
-          alarmPolicy: isSecurityDeviceType(deviceType)
-            ? {
-                enabled: true,
-                notificationEnabled: true,
-                physicalSirenEnabled: true,
-                fullscreenEnabled: true,
-              }
-            : null,
-          alarmSchedules: isSecurityDeviceType(deviceType)
-            ? {
-                default: {
-                  enabled: true,
-                  start: "23:00",
-                  end: "06:00",
-                  repeatMinutes: 0,
-                  days: [1, 2, 3, 4, 5, 6, 7],
-                },
-              }
-            : null,
-          availability: "unknown",
-          last_seen: null,
-
-          battery: null,
-          battery_low: null,
-          battpercentage: null,
-          voltage: null,
-          linkquality: null,
-
-          contact: null,
-          smoke: null,
-          tamper: false,
-          temperature: null,
-          humidity: null,
-          action: null,
-
-          // Cảm biến chuyển động / rung.
-          occupancy: null,
-          motion: null,
-          vibration: null,
-          vibration_strength: null,
-          last_vibration_at: null,
-          vibration_active_until: null,
-          glass_break: null,
-          broken_glass: null,
-          sensitivity: null,
-
-          // Cảm biến khí CO.
-          carbon_monoxide: null,
-          co: null,
-
-          // Còi báo động. Bước này chỉ lưu cấu hình nhận được,
-          // chưa tự động gửi lệnh bật còi.
-          melody: null,
-          duration: null,
-          volume: null,
-          last_siren_report_at: null,
-
-          last_event: null,
-          created: Date.now(),
-          updated_at: Date.now(),
-        });
-
-        await db.ref(`system/devices_by_ieee/${ieee}`).set({
-          uid,
-          homeId,
-          deviceId: DEVICE_ID,
-          hubType: "raspberry_pi",
-          updatedAt: Date.now(),
-        });
-
-        deviceMap[ieee] = { uid, homeId };
-        scheduleLocalRuntimeSnapshotSave();
-
-        const pairedHome = getCachedHomeData(uid, homeId) || {};
-        const pairedHomeName = String(
-          pairedHome.name || homeId,
-        ).trim() || homeId;
-
-        await addHomeNotificationToHomeRecipients({
-          ownerUid: uid,
-          homeId,
-          homeName: pairedHomeName,
-          type: "device_added",
-          category: "device",
-          severity: "info",
-          title: "Thiết bị mới",
-          message: `${defaultName}: Thiết bị mới`,
-          deviceId: ieee,
-          entityType: "device",
-          entityId: ieee,
-          dedupeKey: `device_added|${ieee}`,
-          dedupeMs: 60 * 1000,
-          data: {
-            deviceName: defaultName,
-            deviceType,
-            roomId: roomId || "unassigned",
-          },
-        });
-
-        console.log("✅ DEVICE READY:", ieee);
-        return;
-      }
-    }
-
-    return;
-  } catch (err) {
-    console.log("MQTT PAIRING ERROR:", err.message);
-  }
-});
-
 // ================= MQTT DEVICE INGESTION DOMAIN =================
 // Owns Zigbee device availability, CO fast-path throttling, telemetry
-// persistence, sensor-state normalization and Alarm fanout. Pairing stays in
-// this composition root because it is a separate authorization workflow.
+// persistence, sensor-state normalization and Alarm fanout.
 const mqttDeviceIngestionDomain = createMqttDeviceIngestionDomain({
   client,
   db,
@@ -9636,7 +8865,58 @@ const mqttDeviceIngestionDomain = createMqttDeviceIngestionDomain({
 });
 
 const {
+  forgetDeviceRuntime,
   startMqttDeviceIngestion,
+  stopMqttDeviceIngestion,
 } = mqttDeviceIngestionDomain;
 
+// ================= DEVICE MANAGEMENT DOMAIN =================
+// Owns the canonical device index, pairing authorization, permit-join,
+// Zigbee interview persistence and guarded device deletion.
+const deviceManagementDomain = createDeviceManagementDomain({
+  client,
+  db,
+  deviceMap,
+  deviceId: DEVICE_ID,
+  getDeviceTypeFromModel,
+  isSecurityDeviceType,
+  getCachedHomeData,
+  getSharedMembersForHome: (homeId) => {
+    return sharedByHomeCache.get(homeId) || {};
+  },
+  addHomeNotificationToHomeRecipients,
+  scheduleLocalRuntimeSnapshotSave,
+  forgetDeviceRuntime,
+  log: (...args) => console.log(...args),
+});
+
+const {
+  startDeviceManagement,
+  stopDeviceManagement,
+} = deviceManagementDomain;
+
 startMqttDeviceIngestion();
+
+init().catch((error) => {
+  console.log("BACKEND INIT ERROR:", error.message);
+});
+
+process.once("SIGTERM", async () => {
+  hubUpdateBridge?.stop();
+  await stopDeviceManagement();
+  stopMqttDeviceIngestion();
+  stopHomeActivityMonitor();
+  stopScheduledReminderMonitor();
+  persistRuntimeBeforeExit("SIGTERM");
+  process.exit(0);
+});
+
+process.once("SIGINT", async () => {
+  hubUpdateBridge?.stop();
+  await stopDeviceManagement();
+  stopMqttDeviceIngestion();
+  stopHomeActivityMonitor();
+  stopScheduledReminderMonitor();
+  persistRuntimeBeforeExit("SIGINT");
+  process.exit(0);
+});

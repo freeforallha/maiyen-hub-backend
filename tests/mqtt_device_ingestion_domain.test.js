@@ -167,6 +167,19 @@ test("MQTT ingestion listener starts once and can be stopped", () => {
   assert.equal(domain.getRuntimeState().started, false);
 });
 
+test("removed devices clear their private ingestion runtime", () => {
+  const { domain } = createHarness();
+
+  domain.getDevicePersistenceRuntime("d1", {
+    type: "door",
+    contact: true,
+  });
+  assert.equal(domain.getRuntimeState().persistenceRuntimeCount, 1);
+  assert.equal(domain.forgetDeviceRuntime("d1"), true);
+  assert.equal(domain.getRuntimeState().persistenceRuntimeCount, 0);
+  assert.equal(domain.forgetDeviceRuntime("d1"), false);
+});
+
 test("availability updates cache and Firebase only when state changes", async () => {
   const homes = {
     "u1|h1": {

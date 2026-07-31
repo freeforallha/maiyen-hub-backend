@@ -1435,6 +1435,22 @@ async function handleMqttDeviceMessage(topic, msg) {
     return true;
   }
 
+  function forgetDeviceRuntime(rawDeviceId) {
+    const deviceId = String(rawDeviceId || "").trim();
+
+    if (!deviceId) {
+      return false;
+    }
+
+    const persistenceRemoved =
+      devicePersistenceRuntimeMap.delete(deviceId);
+    const coRuntimeRemoved = coSensorRuntimeMap.delete(deviceId);
+    const coQueueRemoved =
+      coSensorProcessingPromiseMap.delete(deviceId);
+
+    return persistenceRemoved || coRuntimeRemoved || coQueueRemoved;
+  }
+
   function getRuntimeState() {
     return {
       started,
@@ -1445,6 +1461,7 @@ async function handleMqttDeviceMessage(topic, msg) {
   }
 
   return {
+    forgetDeviceRuntime,
     enqueueCarbonMonoxidePacket,
     getDevicePersistenceRuntime,
     getRuntimeState,

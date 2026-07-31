@@ -50,6 +50,7 @@ FILES=(
   "domains/runtime/local_runtime.js"
   "domains/devices/device_profile.js"
   "domains/devices/mqtt_device_ingestion.js"
+  "domains/devices/device_management.js"
   "domains/alarm/alarm_schedule.js"
   "domains/alarm/alarm_incident.js"
   "domains/alarm/alarm_incident_lifecycle.js"
