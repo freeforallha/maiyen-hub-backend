@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, health, Auto Away, runtime, device, notification and Alarm domains", () => {
+test("composition root uses extracted Hub, health, Presence, Auto Away, runtime, device, notification and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -25,6 +25,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device, n
   assert.match(source, /createHomeActivityDomain/);
   assert.match(source, /domains\/notifications\/home_activity/);
   assert.match(source, /createSystemHealthDomain/);
+  assert.match(source, /createPresenceSessionCoordinator/);
+  assert.match(source, /domains\/presence\/presence_session/);
   assert.match(source, /createAutoAwayDomain/);
   assert.match(source, /createLocalRuntimeDomain/);
   assert.match(source, /domains\/devices\/device_profile/);
@@ -63,6 +65,8 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device, n
     source,
     /function resolveAutoAwayParticipantSelection\(/,
   );
+  assert.doesNotMatch(source, /function getAccountSessionStatus\(/);
+  assert.doesNotMatch(source, /function getMemberPresenceStatus\(/);
   assert.doesNotMatch(source, /function ensureLocalRuntimeDirectory\(/);
   assert.doesNotMatch(source, /function enqueueOfflineOperation\(/);
   assert.doesNotMatch(source, /function flushOfflineOperationQueue\(/);
@@ -119,6 +123,32 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device, n
     /const crypto = require\(["']crypto["']\);/,
   );
 
+  const autoAwaySource = fs.readFileSync(
+    path.join(ROOT, "domains", "auto_away", "auto_away.js"),
+    "utf8",
+  );
+  const presenceSessionSource = fs.readFileSync(
+    path.join(ROOT, "domains", "presence", "presence_session.js"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(
+    autoAwaySource,
+    /function getPresenceRecoveryCandidate\(/,
+  );
+  assert.doesNotMatch(
+    autoAwaySource,
+    /function normalizePresenceMonitoringWarnings\(/,
+  );
+  assert.match(
+    presenceSessionSource,
+    /function createPresenceSessionCoordinator\(/,
+  );
+  assert.match(
+    presenceSessionSource,
+    /function prepareSessionContext\(/,
+  );
+
   const deploySource = fs.readFileSync(
     path.join(ROOT, "scripts", "deploy_backend_production.sh"),
     "utf8",
@@ -138,6 +168,10 @@ test("composition root uses extracted Hub, health, Auto Away, runtime, device, n
   assert.match(
     deploySource,
     /domains\/system_health\/system_health\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/presence\/presence_session\.js/,
   );
   assert.match(
     deploySource,

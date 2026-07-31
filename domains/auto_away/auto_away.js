@@ -1,9 +1,8 @@
 "use strict";
 
 const {
-  buildPresenceRecoveryMessage,
-  createPresenceRecoveryCoordinator,
-} = require("../../presence_recovery");
+  createPresenceSessionCoordinator,
+} = require("../presence/presence_session");
 const {
   memberPresenceStatusSignature,
   presenceCleanupTargetSignature,
@@ -17,6 +16,7 @@ function createAutoAwayDomain({
   addHomeNotificationToHomeRecipients,
   isSecurityDeviceType,
   normalizeHomeSecurityMode,
+  presenceSessionCoordinator: injectedPresenceSessionCoordinator = null,
   now = () => Date.now(),
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
@@ -59,31 +59,38 @@ function createAutoAwayDomain({
   // backend sẽ bắt đầu lại chu kỳ tự bật Bảo vệ.
   const AUTO_AWAY_MANUAL_NORMAL_SNOOZE_MS = 2 * 60 * 1000;
 
-  // Chỉ dùng để hiển thị sức khỏe giám sát, không đổi inside/outside
-  // thành unknown và không loại thành viên khỏi Auto Away.
-  // Native geofence có thể im lặng nhiều giờ khi người dùng không
-  // đi qua ranh giới, đây là hành vi bình thường.
-  const AUTO_AWAY_MONITORING_HEALTH_STALE_MS =
-    24 * 60 * 60 * 1000;
-  const IOS_STALE_PRESENCE_MAX_AGE_MS =
-    24 * 60 * 60 * 1000;
-  // Nếu app/foreground service không ghi heartbeat nữa
-  // (máy shutdown, hết pin, app bị kill hoàn toàn),
-  // sau 12 phút backend sẽ coi vị trí là không xác định.
-  const ACCOUNT_SESSION_STALE_MS =
-    12 * 60 * 1000;
-
-  // Trước khi Android session bị chuyển sang unknown, backend gửi tối đa
-  // hai data-only FCM high-priority để app tự khôi phục foreground task và
-  // ghi heartbeat ngay. Push thành công được giữ một grace ngắn; nếu app
-  // vẫn không phản hồi sau hai lần thì trạng thái mới chuyển unknown.
-  const presenceRecoveryCoordinator =
-    createPresenceRecoveryCoordinator({
-      triggerAgeMs: 8 * 60 * 1000,
-      retryCooldownMs: 3 * 60 * 1000,
-      graceMs: 3 * 60 * 1000,
-      maxAttempts: 2,
+  // Session freshness, iOS geofence continuity, monitoring health and
+  // Android recovery requests are isolated in the Presence domain.
+  const presenceSessionCoordinator =
+    injectedPresenceSessionCoordinator ||
+    createPresenceSessionCoordinator({
+      sendPushToUser,
+      now,
     });
+
+  for (const methodName of [
+    "getAccountSessionStatus",
+    "normalizePresenceMonitoringWarnings",
+    "monitoringWarningsToFirebaseMap",
+    "getPresenceMonitoringAvailability",
+    "getMemberPresenceStatus",
+    "prepareSessionContext",
+  ]) {
+    if (typeof presenceSessionCoordinator[methodName] !== "function") {
+      throw new TypeError(
+        `createAutoAwayDomain requires presenceSessionCoordinator.${methodName}`,
+      );
+    }
+  }
+
+  const {
+    getAccountSessionStatus,
+    normalizePresenceMonitoringWarnings,
+    monitoringWarningsToFirebaseMap,
+    getPresenceMonitoringAvailability,
+    getMemberPresenceStatus,
+    prepareSessionContext,
+  } = presenceSessionCoordinator;
 
   let autoAwayTimer = null;
   let autoAwayScanRunning = false;
@@ -174,473 +181,6 @@ function createAutoAwayDomain({
 
       return isSecurityDeviceType(deviceType);
     });
-  }
-
-  function getAccountSessionStatus(account, now) {
-    const sessions = Object.values(
-      asObject(account?.sessions),
-    ).map((rawSession) => asObject(rawSession));
-
-    if (sessions.length === 0) {
-      return {
-        active: false,
-        connected: false,
-        reason: "legacy_session_missing",
-        freshestSeenAt: 0,
-        appState: "",
-        signedInSessionCount: 0,
-      };
-    }
-
-    let signedInCount = 0;
-    let active = false;
-    let connected = false;
-    let freshestSeenAt = 0;
-    let freshestAppState = "";
-    let freshestPlatform = "";
-
-    for (const session of sessions) {
-      if (session.signedIn !== true) {
-        continue;
-      }
-
-      signedInCount++;
-
-      const lastSeenAt = Math.max(
-        Number(session.lastSeenAt || 0),
-        Number(session.lastLoginAt || 0),
-      );
-
-      if (lastSeenAt >= freshestSeenAt) {
-        freshestSeenAt = lastSeenAt;
-        freshestAppState = String(
-          session.appState || "",
-        ).trim();
-        freshestPlatform = String(
-          session.platform || "",
-        ).trim();
-      }
-
-      const sessionIsActive =
-        lastSeenAt > 0 &&
-        now - lastSeenAt <= ACCOUNT_SESSION_STALE_MS;
-
-      if (!sessionIsActive) {
-        continue;
-      }
-
-      active = true;
-
-      if (session.connected === true) {
-        connected = true;
-      }
-    }
-
-    if (active) {
-      return {
-        active: true,
-        connected,
-        reason: "",
-        freshestSeenAt,
-        appState: freshestAppState,
-        platform: freshestPlatform,
-        signedInSessionCount: signedInCount,
-      };
-    }
-
-    return {
-      active: false,
-      connected: false,
-      reason:
-        signedInCount > 0
-          ? "session_stale"
-          : "signed_out",
-      freshestSeenAt,
-      appState: freshestAppState,
-      platform: freshestPlatform,
-      signedInSessionCount: signedInCount,
-    };
-  }
-
-
-  function getPresenceRecoveryCandidate(uid, account) {
-    const value = asObject(account);
-    const activeSession = asObject(value.activeSession);
-    const installationId = String(
-      activeSession.installationId || "",
-    ).trim();
-    const sessionId = String(
-      activeSession.sessionId || "",
-    ).trim();
-
-    if (!installationId || !sessionId) {
-      return null;
-    }
-
-    const session = asObject(
-      asObject(value.sessions)[installationId],
-    );
-
-    if (
-      session.signedIn !== true ||
-      String(session.sessionId || "").trim() !== sessionId
-    ) {
-      return null;
-    }
-
-    const lastSeenAt = Math.max(
-      Number(session.lastSeenAt || 0),
-      Number(session.lastLoginAt || 0),
-    );
-
-    return {
-      uid: String(uid || "").trim(),
-      installationId,
-      platform: String(session.platform || "").trim(),
-      signedIn: true,
-      lastSeenAt,
-    };
-  }
-
-  function normalizePresenceMonitoringWarnings(presence) {
-    const value = asObject(presence);
-    const warnings = new Set();
-    const rawWarnings = value.monitoringWarnings;
-
-    if (Array.isArray(rawWarnings)) {
-      for (const rawWarning of rawWarnings) {
-        const warning = String(rawWarning || "").trim();
-
-        if (warning) {
-          warnings.add(warning);
-        }
-      }
-    } else if (
-      rawWarnings &&
-      typeof rawWarnings === "object"
-    ) {
-      for (const [rawWarning, enabled] of Object.entries(
-        rawWarnings,
-      )) {
-        const warning = String(rawWarning || "").trim();
-
-        if (warning && enabled === true) {
-          warnings.add(warning);
-        }
-      }
-    } else {
-      const warning = String(rawWarnings || "").trim();
-
-      if (warning) {
-        warnings.add(warning);
-      }
-    }
-
-    // Tương thích dữ liệu từ phiên bản app cũ.
-    // Các trạng thái này chỉ là khuyến nghị, không được loại thành viên
-    // khỏi phép tính Auto Away.
-    if (value.batteryUnrestricted === false) {
-      warnings.add("battery_optimization_recommended");
-    }
-
-    if (value.backgroundRestricted === true) {
-      warnings.add("background_activity_restricted");
-    }
-
-    if (value.autoStartConfirmed === false) {
-      warnings.add("auto_start_recommended");
-    }
-
-    const legacyReason = String(
-      value.monitoringBlockingReason || "",
-    ).trim();
-
-    if (
-      legacyReason === "battery_optimization_required"
-    ) {
-      warnings.add("battery_optimization_recommended");
-    } else if (
-      legacyReason === "background_restricted"
-    ) {
-      warnings.add("background_activity_restricted");
-    } else if (
-      legacyReason === "auto_start_required"
-    ) {
-      warnings.add("auto_start_recommended");
-    }
-
-    return Array.from(warnings).sort();
-  }
-
-  function monitoringWarningsToFirebaseMap(warnings) {
-    const result = {};
-
-    for (const rawWarning of Array.isArray(warnings)
-      ? warnings
-      : []) {
-      const warning = String(rawWarning || "").trim();
-
-      if (warning) {
-        result[warning] = true;
-      }
-    }
-
-    return Object.keys(result).length > 0
-      ? result
-      : null;
-  }
-
-  function getPresenceMonitoringAvailability(presence) {
-    const value = asObject(presence);
-
-    // locationAlwaysGranted là nguồn chuẩn của app hiện tại.
-    if (
-      Object.prototype.hasOwnProperty.call(
-        value,
-        "locationAlwaysGranted",
-      )
-    ) {
-      return value.locationAlwaysGranted === true;
-    }
-
-    // Tương thích ngắn hạn với bản app đã ghi monitoringAvailable.
-    if (
-      Object.prototype.hasOwnProperty.call(
-        value,
-        "monitoringAvailable",
-      )
-    ) {
-      return value.monitoringAvailable === true;
-    }
-
-    // Dữ liệu rất cũ chưa có hai trường trên.
-    return value.monitoringEligible !== false;
-  }
-
-  function getMemberPresenceStatus(
-    accounts,
-    memberUid,
-    ownerUid,
-    homeId,
-    sessionStatus,
-    now,
-    recoveryGraceActive = false,
-  ) {
-    const presence = asObject(
-      accounts?.[memberUid]?.homePresence?.[homeId],
-    );
-
-    const storedOwnerUid = String(
-      presence.ownerUid || "",
-    ).trim();
-
-    const storedHomeId = String(
-      presence.homeId || "",
-    ).trim();
-
-    const identityMatches =
-      storedOwnerUid === ownerUid &&
-      storedHomeId === homeId;
-
-    const rawState = String(
-      presence.state || "unknown",
-    ).trim();
-
-    const event = String(
-      presence.event || "",
-    ).trim();
-
-    const storedMonitoringBlockingReason = String(
-      presence.monitoringBlockingReason || "",
-    ).trim();
-
-    const monitoringWarnings =
-      normalizePresenceMonitoringWarnings(presence);
-
-    const monitoringAvailable =
-      getPresenceMonitoringAvailability(presence);
-
-    const hasSignedOutMarker =
-      event === "signed_out" ||
-      storedMonitoringBlockingReason === "signed_out";
-
-    const sessionActive =
-    sessionStatus?.active === true;
-
-  const sessionPlatform = String(
-    sessionStatus?.platform || "",
-  ).trim();
-
-  const hasKnownState =
-    rawState === "inside" ||
-    rawState === "outside";
-
-  const presenceUpdatedAt = Number(
-    presence.updatedAt || 0,
-  );
-
-  const lastConfirmedAt = Math.max(
-    Number(presence.lastConfirmedAt || 0),
-    Number(presence.lastEventOccurredAt || 0),
-    presenceUpdatedAt,
-  );
-
-  const sessionFreshestSeenAt = Number(
-    sessionStatus?.freshestSeenAt || 0,
-  );
-
-  // Lấy lần hoạt động gần nhất từ cả session và geofence.
-  // Geofence enter/exit hợp lệ cũng gia hạn trạng thái iOS.
-  const iosFreshestActivityAt = Math.max(
-    sessionFreshestSeenAt,
-    lastConfirmedAt,
-  );
-
-  const iosPresenceExpired =
-    sessionPlatform === "ios" &&
-    (
-      iosFreshestActivityAt <= 0 ||
-      now - iosFreshestActivityAt >
-        IOS_STALE_PRESENCE_MAX_AGE_MS
-    );
-
-  // iOS được phép giữ trạng thái khi app chỉ đang suspend,
-  // nhưng không được giữ vô thời hạn.
-  const staleIosPresenceAllowed =
-    !sessionActive &&
-    !hasSignedOutMarker &&
-    !iosPresenceExpired &&
-    sessionPlatform === "ios" &&
-    Number(sessionStatus?.signedInSessionCount || 0) > 0;
-
-  const androidRecoveryGraceAllowed =
-    !sessionActive &&
-    !hasSignedOutMarker &&
-    recoveryGraceActive === true &&
-    Number(sessionStatus?.signedInSessionCount || 0) > 0;
-
-  const sessionAllowsPresence =
-    sessionActive ||
-    staleIosPresenceAllowed ||
-    androidRecoveryGraceAllowed;
-
-  // Session đang hoạt động luôn thắng marker signed_out cũ,
-  // nhưng marker signed_out thật vẫn phải chặn trạng thái cũ.
-  const explicitlySignedOut =
-    hasSignedOutMarker && !sessionActive;
-
-  const reactivatedAfterSignedOut =
-    hasSignedOutMarker && sessionActive;
-
-    // Chỉ là trạng thái sức khỏe để hiển thị/cảnh báo.
-    // Không được đổi inside/outside thành unknown chỉ vì không có
-    // heartbeat định kỳ trong lúc app chạy nền hoặc bị kết thúc.
-    const monitoringHealthStale =
-      monitoringAvailable &&
-      hasKnownState &&
-      lastConfirmedAt > 0 &&
-      now - lastConfirmedAt >
-        AUTO_AWAY_MONITORING_HEALTH_STALE_MS;
-
-    const monitoringHealth =
-      !monitoringAvailable
-        ? "unavailable"
-        : !hasKnownState
-          ? "waiting_location"
-          : monitoringHealthStale
-            ? "stale"
-            : "active";
-
-    const monitoringHealthReason =
-      monitoringHealth === "unavailable"
-        ? (
-            storedMonitoringBlockingReason ||
-            "permission_required"
-          )
-        : monitoringHealth === "waiting_location"
-          ? "location_not_confirmed"
-          : monitoringHealth === "stale"
-            ? "no_recent_confirmation"
-            : "";
-
-    // Chỉ quyền vị trí nền là điều kiện bắt buộc.
-    // Pin/chạy nền/tự khởi động chỉ là cảnh báo.
-    const monitoringEligible = monitoringAvailable;
-
-    const monitoringBlockingReason =
-      storedMonitoringBlockingReason === "signed_out"
-        ? "signed_out"
-        : monitoringAvailable
-          ? ""
-          : "permission_required";
-
-    // Background/terminated dựa vào native geofence. Nếu không có
-    // event mới thì trạng thái trước đó vẫn là trạng thái xác nhận
-    // gần nhất; không được tự biến thành unknown sau 2 phút.
-    const state =
-      identityMatches &&
-      sessionAllowsPresence &&
-      !reactivatedAfterSignedOut &&
-      hasKnownState
-        ? rawState
-        : "unknown";
-
-    const eligibleForArming =
-      identityMatches &&
-      sessionAllowsPresence &&
-      !reactivatedAfterSignedOut &&
-      monitoringEligible &&
-      hasKnownState;
-
-    const unknownWhileMonitored =
-      identityMatches &&
-      sessionAllowsPresence &&
-      monitoringEligible &&
-      (
-        reactivatedAfterSignedOut ||
-        !hasKnownState
-      );
-
-    const sessionReason = sessionActive
-      ? ""
-      : explicitlySignedOut
-        ? "signed_out"
-        : staleIosPresenceAllowed
-          ? "ios_background_geofence"
-          : androidRecoveryGraceAllowed
-            ? "android_presence_recovery"
-            : String(sessionStatus?.reason || "").trim();
-
-    return {
-      identityMatches,
-      eligibleForArming,
-      unknownWhileMonitored,
-      sessionActive,
-      sessionAllowsPresence,
-      staleIosPresenceAllowed,
-      androidRecoveryGraceAllowed,
-      sessionReason,
-      reactivatedAfterSignedOut,
-      needsSessionCleanup:
-        identityMatches && !sessionAllowsPresence,
-      state,
-      rawState,
-      event,
-      monitoringEligible,
-      monitoringAvailable,
-      monitoringWarnings,
-      monitoringBlockingReason,
-      monitoringHealth,
-      monitoringHealthReason,
-      monitoringHealthStale,
-      lastConfirmedAt,
-      storedMonitoringEligible:
-        presence.monitoringEligible === true,
-      storedMonitoringAvailable:
-        presence.monitoringAvailable === true,
-      storedMonitoringBlockingReason,
-      updatedAt: presenceUpdatedAt,
-    };
   }
 
   function runtimeSignature(runtime) {
@@ -878,85 +418,14 @@ function createAutoAwayDomain({
       const updates = {};
       const logs = [];
       const modeNotifications = [];
-      const sessionStatusByUid = new Map();
       const pendingPresenceCleanupRuntimeUpdates = [];
+      const {
+        sessionStatusByUid,
+        recoveryGraceByUid: presenceRecoveryGraceByUid,
+        logs: presenceSessionLogs,
+      } = await prepareSessionContext(accounts, currentTime);
 
-      const presenceRecoveryCandidateByUid = new Map();
-      const presenceRecoveryGraceByUid = new Map();
-
-      for (const [accountUid, rawAccount] of Object.entries(accounts)) {
-        const account = asObject(rawAccount);
-
-        sessionStatusByUid.set(
-          accountUid,
-          getAccountSessionStatus(
-            account,
-            currentTime,
-          ),
-        );
-
-        const candidate = getPresenceRecoveryCandidate(
-          accountUid,
-          account,
-        );
-
-        if (candidate) {
-          presenceRecoveryCandidateByUid.set(
-            accountUid,
-            candidate,
-          );
-        }
-      }
-
-      for (const [accountUid, candidate] of
-        presenceRecoveryCandidateByUid.entries()) {
-        const plan = presenceRecoveryCoordinator.evaluate(
-          candidate,
-          currentTime,
-        );
-
-        if (plan.shouldRequest) {
-          let result = { sent: 0 };
-
-          try {
-            result = await sendPushToUser(
-              accountUid,
-              buildPresenceRecoveryMessage({
-                requestedAt: currentTime,
-                attemptNumber: plan.attemptNumber,
-              }),
-              "PRESENCE RECOVERY",
-            );
-          } catch (error) {
-            logs.push(
-              `⚠️ PRESENCE RECOVERY PUSH ERROR: ${accountUid} ${error.message}`,
-            );
-          }
-
-          presenceRecoveryCoordinator.recordAttempt(
-            plan,
-            result,
-            currentTime,
-          );
-
-          logs.push(
-            `📍 PRESENCE RECOVERY REQUEST: ${accountUid} attempt=${plan.attemptNumber} sent=${Number(result.sent || 0)}`,
-          );
-        }
-
-        const currentRecovery =
-          presenceRecoveryCoordinator.evaluate(
-            candidate,
-            currentTime,
-          );
-
-        if (currentRecovery.graceActive) {
-          presenceRecoveryGraceByUid.set(
-            accountUid,
-            true,
-          );
-        }
-      }
+      logs.push(...presenceSessionLogs);
 
       for (const [ownerUid, rawAccount] of Object.entries(accounts)) {
         const account = asObject(rawAccount);
@@ -2099,7 +1568,7 @@ function createAutoAwayDomain({
       "📍 AUTO AWAY MONITOR STARTED:",
       `delay=${AUTO_AWAY_ARM_DELAY_MS / 1000}s`,
       `scan=${AUTO_AWAY_SCAN_INTERVAL_MS / 1000}s`,
-      `sessionStale=${Math.round(ACCOUNT_SESSION_STALE_MS / 60000)}m`,
+      `sessionStale=${Math.round(presenceSessionCoordinator.accountSessionStaleMs / 60000)}m`,
     );
 
     void checkAutoAwayHomes();

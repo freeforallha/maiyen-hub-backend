@@ -44,6 +44,9 @@ const {
   createAutoAwayDomain,
 } = require("./domains/auto_away/auto_away");
 const {
+  createPresenceSessionCoordinator,
+} = require("./domains/presence/presence_session");
+const {
   createLocalRuntimeDomain,
 } = require("./domains/runtime/local_runtime");
 const {
@@ -868,6 +871,14 @@ alarmIncidentPersistenceDomain = createAlarmIncidentPersistence({
   log: (...args) => console.log(...args),
 });
 
+// ================= PRESENCE & SESSION DOMAIN =================
+// Owns session freshness, active-session recovery, monitoring health and
+// platform-specific continuity for Home Presence.
+const presenceSessionCoordinator =
+  createPresenceSessionCoordinator({
+    sendPushToUser,
+  });
+
 // ================= AUTO AWAY DOMAIN =================
 // Presence aggregation, participant selection and automatic security mode
 // transitions are isolated from the composition root.
@@ -881,6 +892,7 @@ const {
   addHomeNotificationToHomeRecipients,
   isSecurityDeviceType,
   normalizeHomeSecurityMode,
+  presenceSessionCoordinator,
   log: (...args) => console.log(...args),
 });
 
