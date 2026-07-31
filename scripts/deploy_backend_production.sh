@@ -228,6 +228,7 @@ echo "Updater  : ${UPDATER_CANDIDATE}"
 echo "Cleanup  : ${SOURCE_CLEANUP}"
 
 echo "=== 1/6 TEST BACKEND ==="
+runuser -u "${RUN_USER}" -- bash -lc "cd '${SOURCE_DIR}' && node scripts/audit_backend_stability.js --strict"
 runuser -u "${RUN_USER}" -- bash -lc "cd '${SOURCE_DIR}' && npm test"
 /usr/bin/node --check "${UPDATER_CANDIDATE}"
 /usr/bin/node --check "${SOURCE_CLEANUP}"
@@ -285,44 +286,22 @@ for file in "${FILES[@]}"; do
   fi
 done
 
-/usr/bin/node --check "${STAGE_DIR}/index.js"
-/usr/bin/node --check "${STAGE_DIR}/backend_localizations.js"
-/usr/bin/node --check "${STAGE_DIR}/system_version.js"
-/usr/bin/node --check "${STAGE_DIR}/hub_update_contract.js"
-/usr/bin/node --check "${STAGE_DIR}/hub_update_bridge.js"
-/usr/bin/node --check "${STAGE_DIR}/hub_update_push.js"
-/usr/bin/node --check "${STAGE_DIR}/hub_update_push_localizations.js"
-/usr/bin/node --check "${STAGE_DIR}/presence_recovery.js"
-/usr/bin/node --check "${STAGE_DIR}/firebase_write_policy.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/hub/hub_identity.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/hub/hub_heartbeat.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/shared/ordered_list_cleanup.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/home/home_status_aggregation.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/home/home_membership.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/home/home_action_requests.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/notifications/fcm_delivery.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/notifications/scheduled_reminder.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/notifications/home_activity.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/system_health/system_health.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/presence/presence_session.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/auto_away/auto_away.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/security/security_mode_orchestration.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/runtime/local_runtime.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/runtime/firebase_request_coordinator.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/runtime/backend_lifecycle.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/devices/device_profile.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/devices/mqtt_device_ingestion.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/alarm/alarm_schedule.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/alarm/alarm_incident.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/alarm/alarm_incident_lifecycle.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/alarm/alarm_incident_persistence.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/alarm/physical_siren.js"
-/usr/bin/node --check "${STAGE_DIR}/domains/alarm/sensor_alarm_engine.js"
-/usr/bin/node --check "${STAGE_DIR}/general_id.js"
-/usr/bin/node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
-  "${STAGE_DIR}/package.json"
-/usr/bin/node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
-  "${STAGE_DIR}/package-lock.json"
+for file in "${FILES[@]}"; do
+  case "${file}" in
+    *.js)
+      /usr/bin/node --check "${STAGE_DIR}/${file}"
+      ;;
+    package.json|package-lock.json)
+      /usr/bin/node -e \
+        'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
+        "${STAGE_DIR}/${file}"
+      ;;
+    *)
+      echo "Lỗi: loại file chưa được xác thực trong deploy manifest: ${file}" >&2
+      false
+      ;;
+  esac
+done
 
 DEPLOY_STARTED=1
 

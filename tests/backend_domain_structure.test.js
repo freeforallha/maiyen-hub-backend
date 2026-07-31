@@ -406,6 +406,15 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
     deploySource,
     /domains\/alarm\/sensor_alarm_engine\.js/,
   );
+  assert.match(deploySource, /audit_backend_stability\.js --strict/);
+  assert.match(
+    deploySource,
+    /for file in "\$\{FILES\[@\]\}"; do[\s\S]*?\*\.js\)[\s\S]*?node --check "\$\{STAGE_DIR\}\/\$\{file\}"/,
+  );
+  assert.match(
+    deploySource,
+    /package\.json\|package-lock\.json\)[\s\S]*?JSON\.parse/,
+  );
 });
 
 test("Hub heartbeat writes only linked homes and keeps one global heartbeat", async () => {

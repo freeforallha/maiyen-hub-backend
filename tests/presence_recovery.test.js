@@ -166,7 +166,7 @@ test("manual deploy luôn mang theo mọi module local mà index.js require", ()
   assert.ok(deployedFiles.has("presence_recovery.js"));
   assert.match(
     deploySource,
-    /node --check "\$\{STAGE_DIR\}\/presence_recovery\.js"/,
+    /for file in "\$\{FILES\[@\]\}"; do[\s\S]*?\*\.js\)[\s\S]*?node --check "\$\{STAGE_DIR\}\/\$\{file\}"/,
   );
 });
 

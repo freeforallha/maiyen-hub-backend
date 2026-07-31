@@ -95,6 +95,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const backendDataCacheSource = read(
     "domains/runtime/backend_data_cache.js",
   );
+  const stabilityAuditSource = read(
+    "scripts/lib/backend_stability_audit.js",
+  );
 
   assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
   assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
@@ -161,6 +164,11 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   );
   assert.doesNotMatch(
     backendDataCacheSource,
+    /SAFEHOME|SafeHome|safehome/,
+  );
+  assert.match(stabilityAuditSource, /buildBackendStabilityAudit/);
+  assert.doesNotMatch(
+    stabilityAuditSource,
     /SAFEHOME|SafeHome|safehome/,
   );
   assert.doesNotMatch(

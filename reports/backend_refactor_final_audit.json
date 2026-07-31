@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-31T15:15:37.497Z",
+  "backendVersion": "1.2.39",
+  "passed": true,
+  "summary": {
+    "checks": 11,
+    "passed": 11,
+    "failed": 0,
+    "indexLines": 6589,
+    "domainFiles": 27,
+    "deployFiles": 39,
+    "localRuntimeRequires": 32,
+    "lifecycleComponents": 24,
+    "requestListeners": 4
+  },
+  "checks": [
+    {
+      "id": "package-lock-version",
+      "passed": true,
+      "detail": "package.json and package-lock.json versions must match",
+      "data": {
+        "packageVersion": "1.2.39",
+        "lockVersion": "1.2.39",
+        "rootLockVersion": "1.2.39"
+      }
+    },
+    {
+      "id": "deploy-manifest-files-exist",
+      "passed": true,
+      "detail": "every deploy manifest file must exist in source",
+      "data": {
+        "missing": []
+      }
+    },
+    {
+      "id": "all-domains-deployed",
+      "passed": true,
+      "detail": "every domain module must be included in the production deploy manifest",
+      "data": {
+        "domainCount": 27,
+        "missing": []
+      }
+    },
+    {
+      "id": "all-index-local-requires-deployed",
+      "passed": true,
+      "detail": "every local JavaScript module required by index.js must be deployed",
+      "data": {
+        "requiredCount": 32,
+        "missing": []
+      }
+    },
+    {
+      "id": "generic-stage-js-validation",
+      "passed": true,
+      "detail": "deploy staging must syntax-check every JavaScript file in FILES"
+    },
+    {
+      "id": "generic-stage-json-validation",
+      "passed": true,
+      "detail": "deploy staging must parse both package JSON files"
+    },
+    {
+      "id": "audit-before-deploy",
+      "passed": true,
+      "detail": "the strict stability audit must run before production backup/install"
+    },
+    {
+      "id": "lifecycle-component-count",
+      "passed": true,
+      "detail": "backend lifecycle must contain exactly 24 unique components",
+      "data": {
+        "count": 24,
+        "keys": [
+          "active_alarm_resume",
+          "alarm_incident_watchdog",
+          "alarm_pause_cleanup",
+          "auto_away_monitor",
+          "backend_data_cache",
+          "backend_ready",
+          "chat_unread_migration",
+          "device_management",
+          "firebase_request_coordinator",
+          "home_activity",
+          "hub_heartbeat",
+          "hub_update_runtime",
+          "legacy_security_schedule_cleanup",
+          "local_runtime_monitors",
+          "local_runtime_state",
+          "mqtt_device_ingestion",
+          "offline_alarm_snapshot_resume",
+          "old_pair_request_cleanup",
+          "physical_siren_monitor",
+          "physical_siren_startup_reconcile",
+          "scheduled_alarm_check",
+          "scheduled_reminder_monitor",
+          "security_mode_orchestration",
+          "system_health_monitor"
+        ]
+      }
+    },
+    {
+      "id": "firebase-request-listeners",
+      "passed": true,
+      "detail": "Firebase request coordinator must expose exactly the four canonical request listeners",
+      "data": {
+        "count": 4,
+        "keys": [
+          "request:alarm_incident_action",
+          "request:alarm_pause",
+          "request:home_siren_action",
+          "request:transfer_owner_accept"
+        ],
+        "missing": [],
+        "unexpected": []
+      }
+    },
+    {
+      "id": "legacy-composition-code",
+      "passed": true,
+      "detail": "legacy startup, signal and direct request listener code must stay removed",
+      "data": {
+        "matches": []
+      }
+    },
+    {
+      "id": "composition-root-size",
+      "passed": true,
+      "detail": "index.js must remain at or below 7000 lines",
+      "data": {
+        "lineCount": 6589,
+        "limit": 7000
+      }
+    }
+  ]
+}
