@@ -30,6 +30,8 @@ test("composition root uses extracted Hub, health, Presence, Auto Away, runtime,
   assert.match(source, /createAutoAwayDomain/);
   assert.match(source, /createLocalRuntimeDomain/);
   assert.match(source, /domains\/devices\/device_profile/);
+  assert.match(source, /createMqttDeviceIngestionDomain/);
+  assert.match(source, /domains\/devices\/mqtt_device_ingestion/);
   assert.match(source, /domains\/alarm\/alarm_schedule/);
   assert.match(source, /createAlarmIncidentDomain/);
   assert.match(source, /domains\/alarm\/alarm_incident/);
@@ -74,6 +76,9 @@ test("composition root uses extracted Hub, health, Presence, Auto Away, runtime,
   assert.doesNotMatch(source, /function normalizeLockState\(/);
   assert.doesNotMatch(source, /function inferDeviceTypeFromPayload\(/);
   assert.doesNotMatch(source, /function getDeviceTypeFromModel\(/);
+  assert.doesNotMatch(source, /function processCarbonMonoxidePacket\(/);
+  assert.doesNotMatch(source, /function getDevicePersistenceRuntime\(/);
+  assert.doesNotMatch(source, /📡 FIREBASE DEVICE UPDATE:/);
   assert.doesNotMatch(source, /function isActiveSignal\(/);
   assert.doesNotMatch(source, /function normalizeAlarmDays\(/);
   assert.doesNotMatch(
@@ -184,6 +189,10 @@ test("composition root uses extracted Hub, health, Presence, Auto Away, runtime,
   assert.match(
     deploySource,
     /domains\/devices\/device_profile\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/devices\/mqtt_device_ingestion\.js/,
   );
   assert.match(
     deploySource,

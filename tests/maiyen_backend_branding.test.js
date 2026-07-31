@@ -65,6 +65,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const presenceSessionSource = read(
     "domains/presence/presence_session.js",
   );
+  const mqttIngestionSource = read(
+    "domains/devices/mqtt_device_ingestion.js",
+  );
 
   assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
   assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
@@ -85,6 +88,8 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.doesNotMatch(homeActivitySource, /function buildSafeHome/);
   assert.doesNotMatch(presenceSessionSource, /function getSafeHome/);
   assert.doesNotMatch(presenceSessionSource, /function buildSafeHome/);
+  assert.doesNotMatch(mqttIngestionSource, /function getSafeHome/);
+  assert.doesNotMatch(mqttIngestionSource, /function buildSafeHome/);
   assert.match(
     presenceSessionSource,
     /createPresenceRecoveryCoordinator/,
