@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, health, Presence, Auto Away, runtime, device, notification and Alarm domains", () => {
+test("composition root uses extracted Hub, health, Presence, Auto Away, Security Mode, runtime, device, notification and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -28,6 +28,13 @@ test("composition root uses extracted Hub, health, Presence, Auto Away, runtime,
   assert.match(source, /createPresenceSessionCoordinator/);
   assert.match(source, /domains\/presence\/presence_session/);
   assert.match(source, /createAutoAwayDomain/);
+  assert.match(source, /createSecurityModeOrchestrationDomain/);
+  assert.match(source, /domains\/security\/security_mode_orchestration/);
+  assert.match(source, /function clearOfflineAlarmDemand\(/);
+  assert.match(
+    source,
+    /offlineAlarmDemandMap,\s*clearOfflineAlarmDemand,/,
+  );
   assert.match(source, /createLocalRuntimeDomain/);
   assert.match(source, /domains\/devices\/device_profile/);
   assert.match(source, /createMqttDeviceIngestionDomain/);
@@ -72,6 +79,10 @@ test("composition root uses extracted Hub, health, Presence, Auto Away, runtime,
   assert.doesNotMatch(source, /function getAccountSessionStatus\(/);
   assert.doesNotMatch(source, /function getMemberPresenceStatus\(/);
   assert.doesNotMatch(source, /function ensureLocalRuntimeDirectory\(/);
+  assert.doesNotMatch(source, /function attachSecurityModeHomeListener\(/);
+  assert.doesNotMatch(source, /function triggerAlarmForUnsafeStateOnArmed\(/);
+  assert.doesNotMatch(source, /function resolveAllAlarmIncidentsForHome\(/);
+  assert.doesNotMatch(source, /const securityModeHomeListenerMap/);
   assert.doesNotMatch(source, /function enqueueOfflineOperation\(/);
   assert.doesNotMatch(source, /function flushOfflineOperationQueue\(/);
   assert.doesNotMatch(source, /function startFirebaseConnectionMonitor\(/);
@@ -186,6 +197,10 @@ test("composition root uses extracted Hub, health, Presence, Auto Away, runtime,
   assert.match(
     deploySource,
     /domains\/auto_away\/auto_away\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/security\/security_mode_orchestration\.js/,
   );
   assert.match(
     deploySource,

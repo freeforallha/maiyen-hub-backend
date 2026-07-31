@@ -47,6 +47,9 @@ const {
   createPresenceSessionCoordinator,
 } = require("./domains/presence/presence_session");
 const {
+  createSecurityModeOrchestrationDomain,
+} = require("./domains/security/security_mode_orchestration");
+const {
   createLocalRuntimeDomain,
 } = require("./domains/runtime/local_runtime");
 const {
@@ -111,6 +114,7 @@ const alarmPauseExpiryTimerMap = new Map();
 // The extracted local runtime domain owns snapshots, queue persistence and
 // connection-monitor timers, and updates this shared boolean through callbacks.
 let firebaseConnected = false;
+let securityModeOrchestrationDomain = null;
 
 // Offline alarm demand state belongs to the Alarm domain. It remains in the
 // composition root while snapshot and queue persistence are extracted.
@@ -166,6 +170,14 @@ const EMERGENCY_MERGE_WINDOW_MS = 10 * 1000;
 // trong 60 giây gần nhất mới được xem xét phát lại. Trạng thái nguy hiểm
 // liên tục như khói/CO/gas vẫn được đánh giá theo trạng thái hiện tại.
 const UNPROTECTED_TRANSIENT_REPLAY_WINDOW_MS = 60 * 1000;
+
+function isHomeUnprotected(home) {
+  if (securityModeOrchestrationDomain) {
+    return securityModeOrchestrationDomain.isHomeUnprotected(home);
+  }
+
+  return normalizeHomeSecurityMode(home?.securityMode) === "unprotected";
+}
 
 const ALARM_INCIDENT_AUTO_EXPIRE_MS = 30 * 60 * 1000;
 
@@ -886,6 +898,51 @@ const {
   presenceSessionCoordinator,
   log: (...args) => console.log(...args),
 });
+
+// ================= SECURITY MODE ORCHESTRATION DOMAIN =================
+// Owns mode listeners, startup recovery, unsafe-state re-evaluation,
+// unprotected cleanup and the transition back to protected operation.
+securityModeOrchestrationDomain =
+  createSecurityModeOrchestrationDomain({
+    db,
+    normalizeHomeSecurityMode,
+    normalizeSecurityModeRepeatMinutes,
+    getNextAlarmTimeText,
+    isSecurityDeviceType,
+    getUnsafeSecurityReason,
+    getAlarmReceiverUidsForHome,
+    getCachedAccountData,
+    normalizeDeviceAlarmPolicy,
+    resolveDeviceAlarmConfigurationForReceiver,
+    sensorEventSeverity: SENSOR_EVENT_SEVERITY,
+    sensorEventCategory: SENSOR_EVENT_CATEGORY,
+    getAlarmIncidentTargetKey,
+    getActiveAlarmIncident,
+    clearAlarmIncidentTimers,
+    removeLocalActiveAlarmIncident,
+    startOrMergeAlarmIncidents,
+    sendAlarmResolvedPush,
+    resolveAlarmIncidentForReceiver,
+    offlineAlarmDemandMap,
+    clearOfflineAlarmDemand,
+    setPhysicalSirenForHome,
+    isEmergencyDeviceType,
+    getCurrentEmergencyReason,
+    getCachedHomeData,
+    validateSecurityIncidentsForHome,
+    clearScheduleAlarmRuntimeForHome,
+    checkScheduledAlarms,
+    getCachedAccountsObject,
+    unprotectedTransientReplayWindowMs:
+      UNPROTECTED_TRANSIENT_REPLAY_WINDOW_MS,
+    log: (...args) => console.log(...args),
+  });
+
+const {
+  getKnownMode: getKnownSecurityMode,
+  startSecurityModeOrchestration,
+  stopSecurityModeOrchestration,
+} = securityModeOrchestrationDomain;
 
 function getCachedAccountsObject() {
   return Object.fromEntries(accountCache.entries());
@@ -2737,8 +2794,7 @@ async function isAlarmItemAllowedByCurrentHomeMode(item) {
     return true;
   }
 
-  const modeKey = getSecurityModeHomeKey(ownerUid, homeId);
-  const listenerMode = securityModeLastValueMap.get(modeKey);
+  const listenerMode = getKnownSecurityMode(ownerUid, homeId);
 
   if (listenerMode === "unprotected") {
     return false;
@@ -5212,6 +5268,23 @@ async function activateOfflineAlarmDemand(demandKey) {
   );
 }
 
+function clearOfflineAlarmDemand(demandKey) {
+  const cleanKey = String(demandKey || "").trim();
+
+  if (!cleanKey) {
+    return false;
+  }
+
+  const expiryTimer = offlineAlarmExpiryTimerMap.get(cleanKey);
+
+  if (expiryTimer) {
+    clearTimeout(expiryTimer);
+    offlineAlarmExpiryTimerMap.delete(cleanKey);
+  }
+
+  return offlineAlarmDemandMap.delete(cleanKey);
+}
+
 function registerOfflineAlarmDemand(receiverUid, item) {
   if (!item?.ownerUid || !item?.homeId || !item?.deviceId) {
     return;
@@ -6122,722 +6195,8 @@ async function cleanupLegacySecurityScheduleState() {
 }
 
 
-// ================= SECURITY MODE TRANSITION =================
-// Khi một nhà chuyển từ normal -> armed, phải kiểm tra ngay trạng thái
-// hiện tại của toàn bộ sensor. Nhờ vậy cửa/khóa đã mở từ trước vẫn tạo
-// Alarm mà không cần chờ một MQTT event mới.
-const securityModeHomeListenerMap = new Map();
-const securityModeAccountListenerMap = new Map();
-const securityModeLastValueMap = new Map();
-const securityModeTransitionInProgress = new Set();
-
-function getSecurityModeHomeKey(ownerUid, homeId) {
-  return `${ownerUid}|${homeId}`;
-}
-
-function isHomeUnprotected(home) {
-  return normalizeHomeSecurityMode(home?.securityMode) === "unprotected";
-}
-
-function detachSecurityModeHomeListener(ownerUid, homeId) {
-  const key = getSecurityModeHomeKey(ownerUid, homeId);
-  const listener = securityModeHomeListenerMap.get(key);
-
-  if (listener) {
-    listener.ref.off("value", listener.callback);
-    securityModeHomeListenerMap.delete(key);
-  }
-
-  securityModeLastValueMap.delete(key);
-  securityModeTransitionInProgress.delete(key);
-}
-
-async function supersedeSecurityIncidentForModeArming(
-  receiverUid,
-  ownerUid,
-  homeId,
-) {
-  const targetKey = getAlarmIncidentTargetKey(
-    receiverUid,
-    ownerUid,
-    homeId,
-    "security",
-  );
-  const active = await getActiveAlarmIncident(
-    receiverUid,
-    targetKey,
-  );
-
-  if (
-    !active ||
-    active.incident?.status !== "active" ||
-    active.incident?.flowType === "emergency"
-  ) {
-    return "";
-  }
-
-  const now = Date.now();
-
-  clearAlarmIncidentTimers(
-    receiverUid,
-    active.incidentId,
-  );
-
-  await db.ref().update({
-    [`accounts/${receiverUid}/alarmIncidents/${active.incidentId}/status`]:
-      "superseded",
-    [`accounts/${receiverUid}/alarmIncidents/${active.incidentId}/supersededAt`]:
-      now,
-    [`accounts/${receiverUid}/alarmIncidents/${active.incidentId}/supersededReason`]:
-      "security_mode_rearmed",
-    [`accounts/${receiverUid}/alarmIncidents/${active.incidentId}/resolutionAction`]:
-      "security_mode_rearmed",
-    [`accounts/${receiverUid}/alarmIncidents/${active.incidentId}/resolutionType`]:
-      "automatic",
-    [`accounts/${receiverUid}/alarmIncidents/${active.incidentId}/updatedAt`]:
-      now,
-    [`accounts/${receiverUid}/activeAlarmIncidentByTarget/${targetKey}`]:
-      null,
-  });
-
-  removeLocalActiveAlarmIncident(
-    receiverUid,
-    targetKey,
-  );
-
-  console.log(
-    "🔁 SECURITY INCIDENT REARMED:",
-    receiverUid,
-    active.incidentId,
-    ownerUid,
-    homeId,
-  );
-
-  return active.incidentId;
-}
-
-async function triggerAlarmForUnsafeStateOnArmed(
-  ownerUid,
-  homeId,
-) {
-  const transitionKey = getSecurityModeHomeKey(
-    ownerUid,
-    homeId,
-  );
-
-  if (securityModeTransitionInProgress.has(transitionKey)) {
-    return;
-  }
-
-  securityModeTransitionInProgress.add(transitionKey);
-
-  try {
-    const homeSnap = await db
-      .ref(`accounts/${ownerUid}/homes/${homeId}`)
-      .once("value");
-    const home = homeSnap.val();
-
-    // Mode có thể đã được đổi ngược về normal trong lúc đang đọc dữ liệu.
-    if (
-      !home ||
-      normalizeHomeSecurityMode(home.securityMode) !== "armed"
-    ) {
-      return;
-    }
-
-    const homeName = String(home.name || homeId).trim() || homeId;
-    const devices = asObject(home.devices);
-    const repeatMinutes =
-      normalizeSecurityModeRepeatMinutes(
-        home.securityModeRepeatMinutes,
-      );
-    const nextAlarm =
-      getNextAlarmTimeText(repeatMinutes);
-    const alarmItems = [];
-
-    for (const [deviceId, rawDevice] of Object.entries(devices)) {
-      const device = asObject(rawDevice);
-      const deviceType = String(
-        device.type || "unknown",
-      ).trim();
-
-      if (!isSecurityDeviceType(deviceType)) {
-        continue;
-      }
-
-      const deviceName = String(
-        device.name || deviceId,
-      ).trim() || deviceId;
-      const reason = getUnsafeSecurityReason(
-        deviceName,
-        deviceType,
-        device,
-      );
-
-      if (!reason) {
-        continue;
-      }
-
-      alarmItems.push({
-        ownerUid,
-        homeId,
-        homeName,
-        deviceId,
-        deviceName,
-        type: deviceType,
-        reason,
-        repeatMinutes,
-        nextAlarm,
-        alarmSource: "security_mode",
-      });
-    }
-
-    if (alarmItems.length === 0) {
-      console.log(
-        "🛡️ SECURITY MODE ARMED, CURRENT STATE SAFE:",
-        ownerUid,
-        homeId,
-      );
-      return;
-    }
-
-    const receiverUids = getAlarmReceiverUidsForHome(
-      ownerUid,
-      homeId,
-    );
-    let successfulReceivers = 0;
-
-    for (const receiverUid of receiverUids) {
-      try {
-        const receiverAccount =
-          getCachedAccountData(receiverUid) || {};
-        const receiverItems = [];
-
-        for (const item of alarmItems) {
-          const device = asObject(
-            devices[item.deviceId],
-          );
-          const policy = normalizeDeviceAlarmPolicy(
-            device,
-            item.type,
-          );
-
-          if (policy.enabled !== true) {
-            continue;
-          }
-
-          const configuration =
-            await resolveDeviceAlarmConfigurationForReceiver(
-              receiverUid,
-              homeId,
-              item.deviceId,
-              home,
-              receiverAccount,
-              ownerUid,
-            );
-
-          receiverItems.push({
-            ...item,
-            severity: SENSOR_EVENT_SEVERITY.ALARM,
-            eventCategory: SENSOR_EVENT_CATEGORY.SECURITY,
-            alarmLevel: SENSOR_EVENT_SEVERITY.ALARM,
-            notificationEnabled:
-              policy.notificationEnabled,
-            physicalSirenEnabled:
-              policy.physicalSirenEnabled,
-            fullscreenEnabled:
-              configuration.fullscreenEnabled,
-          });
-        }
-
-        if (receiverItems.length === 0) {
-          continue;
-        }
-
-        const supersededIncidentId =
-          await supersedeSecurityIncidentForModeArming(
-            receiverUid,
-            ownerUid,
-            homeId,
-          );
-
-        await startOrMergeAlarmIncidents(
-          receiverUid,
-          receiverItems,
-          { bypassEventControl: true },
-        );
-
-        if (supersededIncidentId) {
-          await sendAlarmResolvedPush({
-            uid: receiverUid,
-            incidentId: supersededIncidentId,
-            homeId,
-            resolvedBy: "safehome_backend",
-            action: "security_mode_rearmed",
-            flowType: "security",
-            status: "superseded",
-            hasRemainingActiveIncidents: true,
-          });
-        }
-
-        successfulReceivers++;
-      } catch (error) {
-        console.log(
-          "SECURITY MODE RECEIVER ALARM ERROR:",
-          receiverUid,
-          ownerUid,
-          homeId,
-          error.message,
-        );
-      }
-    }
-
-    console.log(
-      "🚨 SECURITY MODE ARMED WITH EXISTING UNSAFE STATE:",
-      ownerUid,
-      homeId,
-      `items=${alarmItems.length}`,
-      `receivers=${successfulReceivers}/${receiverUids.length}`,
-    );
-  } catch (error) {
-    console.log(
-      "SECURITY MODE TRANSITION ALARM ERROR:",
-      ownerUid,
-      homeId,
-      error.message,
-    );
-  } finally {
-    securityModeTransitionInProgress.delete(transitionKey);
-  }
-}
-
-async function resolveAllAlarmIncidentsForHome(
-  ownerUid,
-  homeId,
-  action = "home_unprotected",
-) {
-  const receiverUids = getAlarmReceiverUidsForHome(ownerUid, homeId);
-  let resolved = 0;
-
-  for (const receiverUid of receiverUids) {
-    try {
-      const incidentsSnap = await db
-        .ref(`accounts/${receiverUid}/alarmIncidents`)
-        .once("value");
-      const incidents = incidentsSnap.val() || {};
-
-      for (const [incidentId, incident] of Object.entries(incidents)) {
-        if (
-          incident?.status !== "active" ||
-          String(incident.ownerUid || "") !== String(ownerUid) ||
-          String(incident.homeId || "") !== String(homeId)
-        ) {
-          continue;
-        }
-
-        const didResolve = await resolveAlarmIncidentForReceiver({
-          receiverUid,
-          incidentId,
-          ownerUid,
-          homeId,
-          resolvedBy: "safehome_backend",
-          action,
-        });
-
-        if (didResolve) {
-          resolved++;
-        }
-      }
-    } catch (error) {
-      console.log(
-        "UNPROTECTED INCIDENT RESOLVE ERROR:",
-        receiverUid,
-        ownerUid,
-        homeId,
-        error.message,
-      );
-    }
-  }
-
-  for (const [key, demand] of Array.from(offlineAlarmDemandMap.entries())) {
-    const item = demand?.item || {};
-
-    if (
-      String(item.ownerUid || "") === String(ownerUid) &&
-      String(item.homeId || "") === String(homeId)
-    ) {
-      clearOfflineAlarmDemand(key);
-    }
-  }
-
-  await setPhysicalSirenForHome(ownerUid, homeId, false, {
-    force: true,
-    reason: action,
-  });
-
-  console.log(
-    "🛡️ HOME UNPROTECTED, ALARMS RESOLVED:",
-    ownerUid,
-    homeId,
-    `incidents=${resolved}`,
-  );
-}
-
-async function triggerEmergencyForCurrentUnsafeState(
-  ownerUid,
-  homeId,
-  { transientEventCutoffAt = 0 } = {},
-) {
-  try {
-    const homeSnap = await db
-      .ref(`accounts/${ownerUid}/homes/${homeId}`)
-      .once("value");
-    const home = homeSnap.val();
-
-    if (!home || isHomeUnprotected(home)) {
-      return;
-    }
-
-    const homeName = String(home.name || homeId).trim() || homeId;
-    const unsafeDevices = [];
-
-    for (const [deviceId, rawDevice] of Object.entries(home.devices || {})) {
-      const device = rawDevice || {};
-      const deviceType = String(device.type || "unknown").trim();
-
-      if (!isEmergencyDeviceType(deviceType)) {
-        continue;
-      }
-
-      const deviceName = String(device.name || deviceId).trim() || deviceId;
-      const reason = getCurrentEmergencyReason(
-        deviceName,
-        deviceType,
-        device,
-        { transientEventCutoffAt },
-      );
-
-      if (!reason) {
-        continue;
-      }
-
-      unsafeDevices.push({
-        deviceId,
-        deviceName,
-        deviceType,
-        reason,
-        policy: normalizeDeviceAlarmPolicy(device, deviceType),
-      });
-    }
-
-    if (unsafeDevices.length === 0) {
-      return;
-    }
-
-    for (const receiverUid of getAlarmReceiverUidsForHome(ownerUid, homeId)) {
-      const receiverAccount = getCachedAccountData(receiverUid);
-      const receiverItems = [];
-
-      for (const unsafeDevice of unsafeDevices) {
-        const configuration =
-          await resolveDeviceAlarmConfigurationForReceiver(
-            receiverUid,
-            homeId,
-            unsafeDevice.deviceId,
-            home,
-            receiverAccount,
-            ownerUid,
-          );
-
-        receiverItems.push({
-          ownerUid,
-          homeId,
-          homeName,
-          deviceId: unsafeDevice.deviceId,
-          deviceName: unsafeDevice.deviceName,
-          type: unsafeDevice.deviceType,
-          reason: unsafeDevice.reason,
-          severity: SENSOR_EVENT_SEVERITY.EMERGENCY,
-          eventCategory: SENSOR_EVENT_CATEGORY.EMERGENCY,
-          alarmLevel: SENSOR_EVENT_SEVERITY.EMERGENCY,
-          repeatMinutes: 0,
-          nextAlarm: "ngay lập tức",
-          alarmSource: "emergency_sensor",
-          notificationEnabled:
-            unsafeDevice.policy.notificationEnabled,
-          physicalSirenEnabled:
-            unsafeDevice.policy.physicalSirenEnabled,
-          fullscreenEnabled:
-            configuration.fullscreenEnabled,
-        });
-      }
-
-      await startOrMergeAlarmIncidents(
-        receiverUid,
-        receiverItems,
-        { bypassEventControl: true },
-      );
-    }
-  } catch (error) {
-    console.log(
-      "MODE CHANGE EMERGENCY RECHECK ERROR:",
-      ownerUid,
-      homeId,
-      error.message,
-    );
-  }
-}
-
-function attachSecurityModeHomeListener(ownerUid, homeId) {
-  const key = getSecurityModeHomeKey(ownerUid, homeId);
-
-  if (securityModeHomeListenerMap.has(key)) {
-    return;
-  }
-
-  const modeRef = db.ref(
-    `accounts/${ownerUid}/homes/${homeId}/securityMode`,
-  );
-
-  const callback = (snapshot) => {
-    const nextMode = normalizeHomeSecurityMode(
-      snapshot.val(),
-    );
-
-    if (!securityModeLastValueMap.has(key)) {
-      securityModeLastValueMap.set(key, nextMode);
-
-      // Sau khi backend khởi động lại, nếu nhà đang ở Mode Bảo vệ
-      // thì phải kiểm tra trạng thái sensor hiện tại. Hàm tạo incident
-      // đã có khóa và cơ chế merge nên không tạo Alarm trùng.
-      if (nextMode === "armed") {
-        setTimeout(() => {
-          void triggerAlarmForUnsafeStateOnArmed(
-            ownerUid,
-            homeId,
-          );
-          void triggerEmergencyForCurrentUnsafeState(
-            ownerUid,
-            homeId,
-          );
-        }, 1000);
-      } else if (nextMode === "unprotected") {
-        clearScheduleAlarmRuntimeForHome(ownerUid, homeId);
-
-        setTimeout(() => {
-          void resolveAllAlarmIncidentsForHome(
-            ownerUid,
-            homeId,
-            "home_unprotected",
-          );
-        }, 200);
-      } else {
-        // Backend khởi động khi nhà đang Bình thường: khôi phục ngay cả
-        // Emergency đang duy trì và lịch Alarm đang hoạt động với sensor
-        // đã không an toàn từ trước, không chờ một MQTT packet mới.
-        setTimeout(() => {
-          void triggerEmergencyForCurrentUnsafeState(
-            ownerUid,
-            homeId,
-          );
-          void checkScheduledAlarms({
-            ownerUidFilter: ownerUid,
-            homeIdFilter: homeId,
-            reason: "startup_normal_recheck",
-          });
-        }, 1000);
-      }
-
-      return;
-    }
-
-    const previousMode = securityModeLastValueMap.get(key);
-    securityModeLastValueMap.set(key, nextMode);
-
-    if (nextMode === "unprotected") {
-      clearScheduleAlarmRuntimeForHome(ownerUid, homeId);
-
-      void resolveAllAlarmIncidentsForHome(
-        ownerUid,
-        homeId,
-        "home_unprotected",
-      );
-      return;
-    }
-
-    if (nextMode === "armed" && previousMode !== "armed") {
-      void triggerAlarmForUnsafeStateOnArmed(ownerUid, homeId);
-      void triggerEmergencyForCurrentUnsafeState(ownerUid, homeId);
-      return;
-    }
-
-    if (nextMode === "normal") {
-      const cachedHome = getCachedHomeData(ownerUid, homeId) || {};
-
-      void validateSecurityIncidentsForHome(
-        ownerUid,
-        homeId,
-        "security_mode_normal",
-        {
-          homeOverride: {
-            ...cachedHome,
-            securityMode: "normal",
-          },
-        },
-      );
-
-      if (previousMode === "unprotected") {
-        const transientEventCutoffAt =
-          Date.now() - UNPROTECTED_TRANSIENT_REPLAY_WINDOW_MS;
-
-        void triggerEmergencyForCurrentUnsafeState(
-          ownerUid,
-          homeId,
-          { transientEventCutoffAt },
-        );
-        void checkScheduledAlarms({
-          ownerUidFilter: ownerUid,
-          homeIdFilter: homeId,
-          reason: "leave_unprotected_recheck",
-        });
-      }
-    }
-  };
-
-  modeRef.on(
-    "value",
-    callback,
-    (error) => {
-      console.log(
-        "SECURITY MODE HOME LISTENER ERROR:",
-        ownerUid,
-        homeId,
-        error.message,
-      );
-    },
-  );
-
-  securityModeHomeListenerMap.set(key, {
-    ref: modeRef,
-    callback,
-  });
-}
-
-function detachSecurityModeAccountListener(ownerUid) {
-  const listener = securityModeAccountListenerMap.get(ownerUid);
-
-  if (listener) {
-    listener.ref.off("child_added", listener.onHomeAdded);
-    listener.ref.off("child_removed", listener.onHomeRemoved);
-    securityModeAccountListenerMap.delete(ownerUid);
-  }
-
-  for (const key of Array.from(securityModeHomeListenerMap.keys())) {
-    if (!key.startsWith(`${ownerUid}|`)) {
-      continue;
-    }
-
-    const homeId = key.slice(ownerUid.length + 1);
-    detachSecurityModeHomeListener(ownerUid, homeId);
-  }
-}
-
-function attachSecurityModeAccountListener(ownerUid) {
-  if (securityModeAccountListenerMap.has(ownerUid)) {
-    return;
-  }
-
-  const homesRef = db.ref(`accounts/${ownerUid}/homes`);
-
-  const onHomeAdded = (homeSnapshot) => {
-    const homeId = String(homeSnapshot.key || "").trim();
-
-    if (homeId) {
-      attachSecurityModeHomeListener(ownerUid, homeId);
-    }
-  };
-
-  const onHomeRemoved = (homeSnapshot) => {
-    const homeId = String(homeSnapshot.key || "").trim();
-
-    if (homeId) {
-      detachSecurityModeHomeListener(ownerUid, homeId);
-    }
-  };
-
-  homesRef.on("child_added", onHomeAdded);
-  homesRef.on("child_removed", onHomeRemoved);
-
-  securityModeAccountListenerMap.set(ownerUid, {
-    ref: homesRef,
-    onHomeAdded,
-    onHomeRemoved,
-  });
-}
-
-async function startSecurityModeTransitionMonitor() {
-  const accountsRef = db.ref("accounts");
-
-  // Cache đã được bootstrap trước khi monitor bắt đầu, nên không cần
-  // tải lại toàn bộ /accounts chỉ để chụp trạng thái nền.
-  const accounts = asObject(getCachedAccountsObject());
-
-  for (const [ownerUid, rawAccount] of Object.entries(accounts)) {
-    const homes = asObject(rawAccount?.homes);
-
-    for (const [homeId, rawHome] of Object.entries(homes)) {
-      const key = getSecurityModeHomeKey(ownerUid, homeId);
-      const home = asObject(rawHome);
-
-      const currentMode = normalizeHomeSecurityMode(
-        home.securityMode,
-      );
-
-      securityModeLastValueMap.set(
-        key,
-        currentMode,
-      );
-
-      if (currentMode === "armed") {
-        setTimeout(() => {
-          void triggerAlarmForUnsafeStateOnArmed(ownerUid, homeId);
-          void triggerEmergencyForCurrentUnsafeState(ownerUid, homeId);
-        }, 1000);
-      } else if (currentMode === "unprotected") {
-        setTimeout(() => {
-          void resolveAllAlarmIncidentsForHome(
-            ownerUid,
-            homeId,
-            "home_unprotected",
-          );
-        }, 200);
-      }
-    }
-
-    attachSecurityModeAccountListener(ownerUid);
-  }
-
-  accountsRef.on("child_added", (accountSnapshot) => {
-    const ownerUid = String(accountSnapshot.key || "").trim();
-
-    if (ownerUid) {
-      attachSecurityModeAccountListener(ownerUid);
-    }
-  });
-
-  accountsRef.on("child_removed", (accountSnapshot) => {
-    const ownerUid = String(accountSnapshot.key || "").trim();
-
-    if (ownerUid) {
-      detachSecurityModeAccountListener(ownerUid);
-    }
-  });
-
-  console.log(
-    "🛡️ SECURITY MODE TRANSITION MONITOR STARTED:",
-    `homes=${securityModeLastValueMap.size}`,
-  );
-}
+// Security Mode transition and recovery orchestration is extracted to
+// domains/security/security_mode_orchestration.js.
 
 // ================= CHAT PUSH =================
 async function migrateLegacyChatUnreadCounters() {
@@ -7275,8 +6634,8 @@ async function init() {
   startAlarmIncidentWatchdog();
 
   await runCloudInitStep(
-    "SECURITY MODE MONITOR",
-    startSecurityModeTransitionMonitor,
+    "SECURITY MODE ORCHESTRATION",
+    startSecurityModeOrchestration,
   );
 
   try {
@@ -8905,6 +8264,7 @@ process.once("SIGTERM", async () => {
   hubUpdateBridge?.stop();
   await stopDeviceManagement();
   stopMqttDeviceIngestion();
+  stopSecurityModeOrchestration();
   stopHomeActivityMonitor();
   stopScheduledReminderMonitor();
   persistRuntimeBeforeExit("SIGTERM");
@@ -8915,6 +8275,7 @@ process.once("SIGINT", async () => {
   hubUpdateBridge?.stop();
   await stopDeviceManagement();
   stopMqttDeviceIngestion();
+  stopSecurityModeOrchestration();
   stopHomeActivityMonitor();
   stopScheduledReminderMonitor();
   persistRuntimeBeforeExit("SIGINT");

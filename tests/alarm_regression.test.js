@@ -38,6 +38,17 @@ const DEVICE_PROFILE_PATH = path.resolve(
 );
 const INDEX_SOURCE = fs.readFileSync(INDEX_PATH, "utf8");
 const AUTO_AWAY_SOURCE = fs.readFileSync(AUTO_AWAY_PATH, "utf8");
+const SECURITY_MODE_PATH = path.resolve(
+  __dirname,
+  "..",
+  "domains",
+  "security",
+  "security_mode_orchestration.js",
+);
+const SECURITY_MODE_SOURCE = fs.readFileSync(
+  SECURITY_MODE_PATH,
+  "utf8",
+);
 const DEVICE_PROFILE_SOURCE = fs.readFileSync(
   DEVICE_PROFILE_PATH,
   "utf8",
@@ -204,6 +215,14 @@ function extractAutoAwayFunctionSource(name) {
     AUTO_AWAY_SOURCE,
     name,
     "domains/auto_away/auto_away.js",
+  );
+}
+
+function extractSecurityModeFunctionSource(name) {
+  return extractFunctionSourceFrom(
+    SECURITY_MODE_SOURCE,
+    name,
+    "domains/security/security_mode_orchestration.js",
   );
 }
 
@@ -1114,10 +1133,10 @@ test("Mode Không bảo vệ im lặng hoàn toàn và chặn Emergency ở đi�
 });
 
 test("startup Bình thường khôi phục Emergency và lịch đang hoạt động", () => {
-  const listenerSource = extractFunctionSource(
-    "attachSecurityModeHomeListener",
+  const listenerSource = extractSecurityModeFunctionSource(
+    "handleInitialMode",
   );
-  const emergencySource = extractFunctionSource(
+  const emergencySource = extractSecurityModeFunctionSource(
     "triggerEmergencyForCurrentUnsafeState",
   );
 
@@ -1188,13 +1207,13 @@ test("Bình thường startup vẫn giữ cửa sổ Emergency hiện có", () =
 });
 
 test("listener truyền cutoff 60 giây khi Không bảo vệ về Bình thường", () => {
-  const source = extractFunctionSource(
-    "attachSecurityModeHomeListener",
+  const source = extractSecurityModeFunctionSource(
+    "handleModeValue",
   );
 
   assert.match(
     source,
-    /previousMode === "unprotected"[\s\S]*?Date\.now\(\) - UNPROTECTED_TRANSIENT_REPLAY_WINDOW_MS/,
+    /previousMode === "unprotected"[\s\S]*?now\(\) - unprotectedTransientReplayWindowMs/,
   );
   assert.match(
     source,
@@ -1966,7 +1985,7 @@ test("startup cho phép còi đủ thời gian xác nhận trước khi báo def
 });
 
 test("chuyển normal sang armed tái kích hoạt trạng thái nguy hiểm đang bị latch", () => {
-  const transitionSource = extractFunctionSource(
+  const transitionSource = extractSecurityModeFunctionSource(
     "triggerAlarmForUnsafeStateOnArmed",
   );
   const startSource = extractAlarmIncidentPersistenceFunctionSource(
@@ -1984,7 +2003,7 @@ test("chuyển normal sang armed tái kích hoạt trạng thái nguy hiểm đa
 });
 
 test("Mode Bảo vệ tạo cấu hình fullscreen riêng cho từng thành viên", () => {
-  const source = extractFunctionSource(
+  const source = extractSecurityModeFunctionSource(
     "triggerAlarmForUnsafeStateOnArmed",
   );
 
@@ -2003,10 +2022,10 @@ test("Mode Bảo vệ tạo cấu hình fullscreen riêng cho từng thành viê
 });
 
 test("Mode Bảo vệ tạo presentation mới thay vì tái dùng incident cũ", () => {
-  const helperSource = extractFunctionSource(
+  const helperSource = extractSecurityModeFunctionSource(
     "supersedeSecurityIncidentForModeArming",
   );
-  const transitionSource = extractFunctionSource(
+  const transitionSource = extractSecurityModeFunctionSource(
     "triggerAlarmForUnsafeStateOnArmed",
   );
 
