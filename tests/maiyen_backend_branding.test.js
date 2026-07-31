@@ -80,6 +80,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const firebaseCoordinatorSource = read(
     "domains/runtime/firebase_request_coordinator.js",
   );
+  const backendLifecycleSource = read(
+    "domains/runtime/backend_lifecycle.js",
+  );
 
   assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
   assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
@@ -116,6 +119,14 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.match(
     firebaseCoordinatorSource,
     /createFirebaseRequestCoordinator/,
+  );
+  assert.match(
+    backendLifecycleSource,
+    /createBackendLifecycleCoordinator/,
+  );
+  assert.match(
+    backendLifecycleSource,
+    /BACKEND LIFECYCLE STARTED/,
   );
   assert.doesNotMatch(
     firebaseCoordinatorSource,

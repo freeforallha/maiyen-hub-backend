@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, Home Status, health, Presence, Auto Away, Security Mode, Firebase coordinator, runtime, device, notification and Alarm domains", () => {
+test("composition root uses extracted Hub, Home Status, health, Presence, Auto Away, Security Mode, Firebase coordinator, Backend Lifecycle, runtime, device, notification and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -43,8 +43,18 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
     source,
     /domains\/runtime\/firebase_request_coordinator/,
   );
-  assert.match(source, /startFirebaseRequestCoordinator\(\)/);
-  assert.match(source, /stopFirebaseRequestCoordinator\(\)/);
+  assert.match(source, /startFirebaseRequestCoordinator/);
+  assert.match(source, /stopFirebaseRequestCoordinator/);
+  assert.match(source, /createBackendLifecycleCoordinator/);
+  assert.match(source, /domains\/runtime\/backend_lifecycle/);
+  assert.match(source, /installBackendSignalHandlers\(\)/);
+  assert.match(source, /startBackendLifecycle\(\)/);
+  assert.match(source, /registerBackendFinalizer/);
+  assert.doesNotMatch(source, /async function init\(/);
+  assert.doesNotMatch(source, /function runCloudInitStep\(/);
+  assert.doesNotMatch(source, /function awaitWithTimeout\(/);
+  assert.doesNotMatch(source, /process\.once\("SIGTERM"/);
+  assert.doesNotMatch(source, /process\.once\("SIGINT"/);
   assert.match(source, /domains\/devices\/device_profile/);
   assert.match(source, /createMqttDeviceIngestionDomain/);
   assert.match(source, /domains\/devices\/mqtt_device_ingestion/);
@@ -252,6 +262,34 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
     /function stopFirebaseRequestCoordinator\(/,
   );
 
+  const backendLifecycleSource = fs.readFileSync(
+    path.join(
+      ROOT,
+      "domains",
+      "runtime",
+      "backend_lifecycle.js",
+    ),
+    "utf8",
+  );
+
+  assert.match(
+    backendLifecycleSource,
+    /function createBackendLifecycleCoordinator\(/,
+  );
+  assert.match(backendLifecycleSource, /function registerComponent\(/);
+  assert.match(
+    backendLifecycleSource,
+    /function stopBackendLifecycle\(/,
+  );
+  assert.match(
+    backendLifecycleSource,
+    /function installSignalHandlers\(/,
+  );
+  assert.match(
+    backendLifecycleSource,
+    /BACKEND STARTUP STEP ERROR:/,
+  );
+
   const deploySource = fs.readFileSync(
     path.join(ROOT, "scripts", "deploy_backend_production.sh"),
     "utf8",
@@ -295,6 +333,10 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.match(
     deploySource,
     /domains\/runtime\/firebase_request_coordinator\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/runtime\/backend_lifecycle\.js/,
   );
   assert.match(
     deploySource,

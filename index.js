@@ -59,6 +59,9 @@ const {
   createFirebaseRequestCoordinator,
 } = require("./domains/runtime/firebase_request_coordinator");
 const {
+  createBackendLifecycleCoordinator,
+} = require("./domains/runtime/backend_lifecycle");
+const {
   isActiveSignal,
   isVibrationAction,
   isGlassBreakAction,
@@ -113,6 +116,9 @@ const {
 const lastNotificationMap = {};
 const lastScheduleAlarmMap = {};
 let scheduledAlarmConfigurationRefreshTimer = null;
+let alarmPauseCleanupInterval = null;
+let scheduledAlarmCheckInterval = null;
+let localRuntimeLoaded = false;
 const alarmPauseExpiryTimerMap = new Map();
 
 // Firebase connection state remains at the composition root because several
@@ -309,6 +315,7 @@ const {
   getHomesLinkedToThisHub,
   writeHubHeartbeat,
   startHubHeartbeat,
+  stopHubHeartbeat,
 } = createHubHeartbeat({
   db,
   deviceId: DEVICE_ID,
@@ -668,6 +675,7 @@ const {
   scheduleLocalRuntimeSnapshotSave,
   startFirebaseConnectionMonitor,
   startOfflineQueueFlushTimer,
+  stop: stopLocalRuntime,
 } = createLocalRuntimeDomain({
   db,
   accountCache,
@@ -718,6 +726,7 @@ const {
 // This monitor never creates Alarm incidents, fullscreen or physical siren.
 const {
   startSystemHealthMonitor,
+  stopSystemHealthMonitor,
 } = createSystemHealthDomain({
   db,
   getFirebaseConnected: () => firebaseConnected,
@@ -778,6 +787,7 @@ const {
   requestPhysicalSirenForIncident,
   reconcileAllPhysicalSirens,
   startPhysicalSirenMonitor,
+  stopPhysicalSirenMonitor,
 } = physicalSirenDomain;
 
 // ================= ALARM INCIDENT LIFECYCLE =================
@@ -904,6 +914,7 @@ const presenceSessionCoordinator =
 // transitions are isolated from the composition root.
 const {
   startAutoAwayMonitor,
+  stopAutoAwayMonitor,
 } = createAutoAwayDomain({
   db,
   getCachedAccountsObject,
@@ -2826,6 +2837,15 @@ function startAlarmIncidentWatchdog() {
     "🧭 ALARM INCIDENT WATCHDOG STARTED:",
     `interval=${ALARM_INCIDENT_WATCHDOG_INTERVAL_MS / 1000}s`,
   );
+}
+
+function stopAlarmIncidentWatchdog() {
+  if (!alarmIncidentWatchdogTimer) {
+    return;
+  }
+
+  clearInterval(alarmIncidentWatchdogTimer);
+  alarmIncidentWatchdogTimer = null;
 }
 
 
@@ -6596,151 +6616,70 @@ async function sendChatNotificationPush({
   );
 }
 
-// ================= INIT =================
-function awaitWithTimeout(promise, timeoutMs, label) {
-  let timeout;
-
-  const timeoutPromise = new Promise((_, reject) => {
-    timeout = setTimeout(() => {
-      reject(new Error(`${label}_timeout`));
-    }, timeoutMs);
-  });
-
-  return Promise.race([promise, timeoutPromise])
-    .finally(() => {
-      clearTimeout(timeout);
-    });
-}
-
-async function runCloudInitStep(
-  label,
-  task,
-  timeoutMs = 2 * 1000,
-) {
-  try {
-    await awaitWithTimeout(
-      Promise.resolve().then(task),
-      timeoutMs,
-      label,
-    );
-  } catch (error) {
-    console.log(`${label} DEFERRED:`, error.message);
-  }
-}
-
-async function init() {
-  loadLocalRuntimeState();
-  startFirebaseConnectionMonitor();
-  startOfflineQueueFlushTimer();
-
-  await runCloudInitStep(
-    "BACKEND DATA CACHE",
-    startBackendDataCache,
-    5 * 1000,
-  );
-
-  if (!firebaseConnected) {
-    await resumeOfflineAlarmDemandsFromSnapshot();
-  }
-
-  await runCloudInitStep(
-    "OLD PAIR REQUEST CLEANUP",
-    () => deviceManagementDomain.cleanupOldPairRequests(),
-  );
-
-  try {
-    startDeviceManagement();
-  } catch (error) {
-    console.log(
-      "DEVICE MANAGEMENT START ERROR:",
-      error.message,
-    );
-  }
-
-  await runCloudInitStep(
-    "LEGACY SECURITY SCHEDULE CLEANUP",
-    cleanupLegacySecurityScheduleState,
-  );
-
-  await runCloudInitStep(
-    "CHAT UNREAD MIGRATION",
-    ensureChatUnreadCounterMigration,
-  );
-
-  await runCloudInitStep(
-    "ACTIVE ALARM RESUME",
-    resumeActiveAlarmIncidents,
-  );
-
-  await runCloudInitStep(
-    "PHYSICAL SIREN STARTUP RECONCILE",
-    async () => {
-      await reconcileAllPhysicalSirens({
-        force: true,
-        reason: "backend_startup",
-      });
-    },
-    15 * 1000,
-  );
-
-  startPhysicalSirenMonitor();
-  startAlarmIncidentWatchdog();
-
-  await runCloudInitStep(
-    "SECURITY MODE ORCHESTRATION",
-    startSecurityModeOrchestration,
-  );
-
-  try {
-    startAutoAwayMonitor();
-  } catch (error) {
-    console.log(
-      "AUTO AWAY MONITOR START ERROR:",
-      error.message,
-    );
-  }
-
-  try {
-    hubUpdatePushCoordinator =
-      createHubUpdatePushCoordinator({
-        db,
-        deviceId: DEVICE_ID,
-        getLinkedHomes: getHomesLinkedToThisHub,
-        getReceiverUids: getAlarmReceiverUidsForHome,
-        getHomeData: getCachedHomeData,
-        getLanguageCode: getUserLanguageCode,
-        sendPushToUser,
-      });
-
-    hubUpdateBridge = createHubUpdateBridge({
+// ================= STARTUP HELPERS =================
+function startHubUpdateRuntime() {
+  hubUpdatePushCoordinator =
+    createHubUpdatePushCoordinator({
       db,
       deviceId: DEVICE_ID,
-      currentVersions: SYSTEM_VERSION,
       getLinkedHomes: getHomesLinkedToThisHub,
-      onStateChanged: () => {
-        void writeHubHeartbeat();
-      },
-      onReleaseChecked: (releaseState) => {
-        return hubUpdatePushCoordinator
-          .handleReleaseCheck(releaseState);
-      },
+      getReceiverUids: getAlarmReceiverUidsForHome,
+      getHomeData: getCachedHomeData,
+      getLanguageCode: getUserLanguageCode,
+      sendPushToUser,
     });
-    hubUpdateBridge.start();
-  } catch (error) {
-    console.log(
-      "HUB UPDATE BRIDGE START ERROR:",
-      error.message,
-    );
+
+  hubUpdateBridge = createHubUpdateBridge({
+    db,
+    deviceId: DEVICE_ID,
+    currentVersions: SYSTEM_VERSION,
+    getLinkedHomes: getHomesLinkedToThisHub,
+    onStateChanged: () => {
+      void writeHubHeartbeat();
+    },
+    onReleaseChecked: (releaseState) => {
+      return hubUpdatePushCoordinator
+        .handleReleaseCheck(releaseState);
+    },
+  });
+
+  hubUpdateBridge.start();
+}
+
+function stopHubUpdateRuntime() {
+  hubUpdateBridge?.stop();
+  hubUpdateBridge = null;
+  hubUpdatePushCoordinator = null;
+}
+
+function startAlarmPauseCleanupMonitor() {
+  if (alarmPauseCleanupInterval) {
+    return;
   }
 
-  startHubHeartbeat();
-  startSystemHealthMonitor();
+  alarmPauseCleanupInterval = setInterval(
+    cleanupExpiredAlarmPause,
+    60000,
+  );
+}
 
-  setInterval(cleanupExpiredAlarmPause, 60000);
-  startScheduledReminderMonitor();
+function stopAlarmPauseCleanupMonitor() {
+  if (!alarmPauseCleanupInterval) {
+    return;
+  }
+
+  clearInterval(alarmPauseCleanupInterval);
+  alarmPauseCleanupInterval = null;
+}
+
+function startScheduledAlarmCheckMonitor() {
+  if (scheduledAlarmCheckInterval) {
+    return;
+  }
+
   // Kiểm tra lịch Alarm mỗi 10 giây để thời điểm bắt đầu lịch không bị
   // trễ tới gần một phút. Hàm chỉ dùng snapshot cache và gom theo receiver.
-  setInterval(() => {
+  scheduledAlarmCheckInterval = setInterval(() => {
     if (firebaseConnected) {
       void checkScheduledAlarms({ reason: "interval" });
       return;
@@ -6753,14 +6692,17 @@ async function init() {
       );
     });
   }, 10000);
-
-  console.log(
-    "🛡️ MAIYEN BACKEND READY:",
-    firebaseConnected ? "cloud" : "offline_local",
-  );
 }
 
-startHomeActivityMonitor();
+function stopScheduledAlarmCheckMonitor() {
+  if (!scheduledAlarmCheckInterval) {
+    return;
+  }
+
+  clearInterval(scheduledAlarmCheckInterval);
+  scheduledAlarmCheckInterval = null;
+}
+
 const transferOwnerAcceptInProgress = new Set();
 
 function normalizeHomeOrder(rawOrder) {
@@ -8251,8 +8193,6 @@ for (const listener of firebaseRequestListeners) {
   registerFirebaseListener(listener);
 }
 
-startFirebaseRequestCoordinator();
-
 // ================= MQTT CONNECT =================
 client.on("connect", () => {
   mqttConnected = true;
@@ -8351,32 +8291,226 @@ const {
   stopDeviceManagement,
 } = deviceManagementDomain;
 
-startMqttDeviceIngestion();
+// ================= BACKEND LIFECYCLE =================
+// Owns deterministic startup ordering, deferred cloud steps, rollback of
+// partially started components and one graceful SIGTERM/SIGINT shutdown path.
+const backendLifecycle = createBackendLifecycleCoordinator({
+  log: (...args) => console.log(...args),
+});
 
-init().catch((error) => {
+const {
+  registerComponent: registerBackendComponent,
+  registerFinalizer: registerBackendFinalizer,
+  installSignalHandlers: installBackendSignalHandlers,
+  startBackendLifecycle,
+} = backendLifecycle;
+
+function addBackendComponent(component) {
+  if (!registerBackendComponent(component)) {
+    throw new Error(
+      `Duplicate backend lifecycle component: ${component.key}`,
+    );
+  }
+}
+
+addBackendComponent({
+  key: "home_activity",
+  start: startHomeActivityMonitor,
+  stop: stopHomeActivityMonitor,
+});
+
+addBackendComponent({
+  key: "firebase_request_coordinator",
+  start: startFirebaseRequestCoordinator,
+  stop: stopFirebaseRequestCoordinator,
+});
+
+addBackendComponent({
+  key: "mqtt_device_ingestion",
+  start: startMqttDeviceIngestion,
+  stop: stopMqttDeviceIngestion,
+});
+
+addBackendComponent({
+  key: "local_runtime_state",
+  start() {
+    loadLocalRuntimeState();
+    localRuntimeLoaded = true;
+  },
+});
+
+addBackendComponent({
+  key: "local_runtime_monitors",
+  start() {
+    startFirebaseConnectionMonitor();
+    startOfflineQueueFlushTimer();
+  },
+  stop: stopLocalRuntime,
+});
+
+addBackendComponent({
+  key: "backend_data_cache",
+  label: "BACKEND DATA CACHE",
+  start: startBackendDataCache,
+  startTimeoutMs: 5 * 1000,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "offline_alarm_snapshot_resume",
+  label: "OFFLINE ALARM RESUME",
+  async start() {
+    if (!firebaseConnected) {
+      await resumeOfflineAlarmDemandsFromSnapshot();
+    }
+  },
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "old_pair_request_cleanup",
+  label: "OLD PAIR REQUEST CLEANUP",
+  start: () => deviceManagementDomain.cleanupOldPairRequests(),
+  startTimeoutMs: 2 * 1000,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "device_management",
+  label: "DEVICE MANAGEMENT START",
+  start: startDeviceManagement,
+  stop: stopDeviceManagement,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "legacy_security_schedule_cleanup",
+  label: "LEGACY SECURITY SCHEDULE CLEANUP",
+  start: cleanupLegacySecurityScheduleState,
+  startTimeoutMs: 2 * 1000,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "chat_unread_migration",
+  label: "CHAT UNREAD MIGRATION",
+  start: ensureChatUnreadCounterMigration,
+  startTimeoutMs: 2 * 1000,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "active_alarm_resume",
+  label: "ACTIVE ALARM RESUME",
+  start: resumeActiveAlarmIncidents,
+  startTimeoutMs: 2 * 1000,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "physical_siren_startup_reconcile",
+  label: "PHYSICAL SIREN STARTUP RECONCILE",
+  start: () => reconcileAllPhysicalSirens({
+    force: true,
+    reason: "backend_startup",
+  }),
+  startTimeoutMs: 15 * 1000,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "physical_siren_monitor",
+  start: startPhysicalSirenMonitor,
+  stop: stopPhysicalSirenMonitor,
+});
+
+addBackendComponent({
+  key: "alarm_incident_watchdog",
+  start: startAlarmIncidentWatchdog,
+  stop: stopAlarmIncidentWatchdog,
+});
+
+addBackendComponent({
+  key: "security_mode_orchestration",
+  label: "SECURITY MODE ORCHESTRATION",
+  start: startSecurityModeOrchestration,
+  stop: stopSecurityModeOrchestration,
+  startTimeoutMs: 2 * 1000,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "auto_away_monitor",
+  label: "AUTO AWAY MONITOR START",
+  start: startAutoAwayMonitor,
+  stop: stopAutoAwayMonitor,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "hub_update_runtime",
+  label: "HUB UPDATE BRIDGE START",
+  start: startHubUpdateRuntime,
+  stop: stopHubUpdateRuntime,
+  failureMode: "defer",
+});
+
+addBackendComponent({
+  key: "hub_heartbeat",
+  start: startHubHeartbeat,
+  stop: stopHubHeartbeat,
+});
+
+addBackendComponent({
+  key: "system_health_monitor",
+  start: startSystemHealthMonitor,
+  stop: stopSystemHealthMonitor,
+});
+
+addBackendComponent({
+  key: "alarm_pause_cleanup",
+  start: startAlarmPauseCleanupMonitor,
+  stop: stopAlarmPauseCleanupMonitor,
+});
+
+addBackendComponent({
+  key: "scheduled_reminder_monitor",
+  start: startScheduledReminderMonitor,
+  stop: stopScheduledReminderMonitor,
+});
+
+addBackendComponent({
+  key: "scheduled_alarm_check",
+  start: startScheduledAlarmCheckMonitor,
+  stop: stopScheduledAlarmCheckMonitor,
+});
+
+addBackendComponent({
+  key: "backend_ready",
+  start() {
+    console.log(
+      "🛡️ MAIYEN BACKEND READY:",
+      firebaseConnected ? "cloud" : "offline_local",
+    );
+  },
+});
+
+if (!registerBackendFinalizer({
+  key: "persist_local_runtime",
+  handler(signal) {
+    if (localRuntimeLoaded) {
+      persistRuntimeBeforeExit(signal);
+    }
+  },
+})) {
+  throw new Error(
+    "Duplicate backend lifecycle finalizer: persist_local_runtime",
+  );
+}
+
+installBackendSignalHandlers();
+
+startBackendLifecycle().catch((error) => {
   console.log("BACKEND INIT ERROR:", error.message);
-});
-
-process.once("SIGTERM", async () => {
-  hubUpdateBridge?.stop();
-  stopFirebaseRequestCoordinator();
-  await stopDeviceManagement();
-  stopMqttDeviceIngestion();
-  stopSecurityModeOrchestration();
-  stopHomeActivityMonitor();
-  stopScheduledReminderMonitor();
-  persistRuntimeBeforeExit("SIGTERM");
-  process.exit(0);
-});
-
-process.once("SIGINT", async () => {
-  hubUpdateBridge?.stop();
-  stopFirebaseRequestCoordinator();
-  await stopDeviceManagement();
-  stopMqttDeviceIngestion();
-  stopSecurityModeOrchestration();
-  stopHomeActivityMonitor();
-  stopScheduledReminderMonitor();
-  persistRuntimeBeforeExit("SIGINT");
-  process.exit(0);
+  process.exit(1);
 });

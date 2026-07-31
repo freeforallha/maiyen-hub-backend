@@ -1096,7 +1096,9 @@ test("lịch bắt đầu với sensor đã không an toàn buộc gửi lần �
   const incidentSource = extractAlarmIncidentPersistenceFunctionSource(
     "startOrMergeAlarmIncidents",
   );
-  const initSource = extractFunctionSource("init");
+  const scheduledMonitorSource = extractFunctionSource(
+    "startScheduledAlarmCheckMonitor",
+  );
 
   assert.match(
     schedulerSource,
@@ -1110,8 +1112,11 @@ test("lịch bắt đầu với sensor đã không an toàn buộc gửi lần �
     incidentSource,
     /forcedRedeliveryItems[\s\S]*?allowFullscreenRedelivery:/,
   );
-  assert.match(initSource, /checkScheduledAlarms\(\{ reason: "interval" \}\)/);
-  assert.match(initSource, /},\s*10000\);/);
+  assert.match(
+    scheduledMonitorSource,
+    /checkScheduledAlarms\(\{ reason: "interval" \}\)/,
+  );
+  assert.match(scheduledMonitorSource, /},\s*10000\);/);
 });
 
 test("Mode Không bảo vệ im lặng hoàn toàn và chặn Emergency ở điểm gửi cuối", () => {
@@ -1979,11 +1984,9 @@ test("log còi periodic được giới hạn nhưng thay đổi trạng thái v
 });
 
 test("startup cho phép còi đủ thời gian xác nhận trước khi báo deferred", () => {
-  const source = extractFunctionSource("init");
-
   assert.match(
-    source,
-    /"PHYSICAL SIREN STARTUP RECONCILE"[\s\S]*?15 \* 1000/,
+    INDEX_SOURCE,
+    /key:\s*"physical_siren_startup_reconcile"[\s\S]*?label:\s*"PHYSICAL SIREN STARTUP RECONCILE"[\s\S]*?startTimeoutMs:\s*15 \* 1000[\s\S]*?failureMode:\s*"defer"/,
   );
 });
 
