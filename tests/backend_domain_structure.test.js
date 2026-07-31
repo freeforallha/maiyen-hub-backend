@@ -20,6 +20,8 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.match(source, /createOrderedListCleanup/);
   assert.match(source, /createHomeStatusAggregation/);
   assert.match(source, /domains\/home\/home_status_aggregation/);
+  assert.match(source, /createHomeMembershipDomain/);
+  assert.match(source, /domains\/home\/home_membership/);
   assert.match(source, /createFcmDeliveryDomain/);
   assert.match(source, /domains\/notifications\/fcm_delivery/);
   assert.match(source, /createScheduledReminderDomain/);
@@ -84,6 +86,9 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.doesNotMatch(source, /function sendScheduledNotification\(/);
   assert.doesNotMatch(source, /function checkScheduledNotifications\(/);
   assert.doesNotMatch(source, /async function addHomeNotificationFromBackend\(/);
+  assert.doesNotMatch(source, /async function handleTransferOwnerAcceptRequest\(/);
+  assert.doesNotMatch(source, /function normalizeHomeOrder\(/);
+  assert.doesNotMatch(source, /const transferOwnerAcceptInProgress/);
   assert.doesNotMatch(source, /async function addHomeNotificationToHomeRecipients\(/);
   assert.doesNotMatch(source, /const homeNotificationRequestInProgress/);
   assert.doesNotMatch(source, /db\.ref\("home_notification_requests"\)\.on/);

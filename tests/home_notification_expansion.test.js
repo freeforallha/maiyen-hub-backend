@@ -19,7 +19,16 @@ const activitySource = fs.readFileSync(
   ),
   "utf8",
 );
-const workflowSource = `${indexSource}\n${activitySource}`;
+const membershipSource = fs.readFileSync(
+  path.join(
+    backendRoot,
+    "domains",
+    "home",
+    "home_membership.js",
+  ),
+  "utf8",
+);
+const workflowSource = `${indexSource}\n${activitySource}\n${membershipSource}`;
 
 function expectAll(values) {
   for (const value of values) {
@@ -71,19 +80,19 @@ test("từ chối chuyển chủ nhà chỉ gửi về đúng chủ nhà cũ", (
 
 test("chuyển chủ nhà thành công tạo Home Notification cho cả hai bên", () => {
   assert.match(
-    indexSource,
+    membershipSource,
     /uid: oldOwnerUid[\s\S]*type: "transfer_owner_accepted"/,
   );
   assert.match(
-    indexSource,
+    membershipSource,
     /uid: newOwnerUid[\s\S]*type: "transfer_owner_accepted"/,
   );
 });
 
 test("lỗi chuyển chủ nhà tạo thông báo thất bại có giới hạn dữ liệu lỗi", () => {
-  assert.match(indexSource, /TRANSFER OWNER FAILURE NOTIFICATION ERROR/);
-  assert.match(indexSource, /type: "transfer_owner_failed"/);
-  assert.match(indexSource, /slice\(0, 200\)/);
+  assert.match(membershipSource, /TRANSFER OWNER FAILURE NOTIFICATION ERROR/);
+  assert.match(membershipSource, /type: "transfer_owner_failed"/);
+  assert.match(membershipSource, /slice\(\s*0,\s*200,?\s*\)/);
 });
 
 test("huỷ tạm dừng Alarm tạo thông báo hoạt động trở lại", () => {

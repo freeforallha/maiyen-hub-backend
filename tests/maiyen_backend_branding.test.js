@@ -65,6 +65,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const homeStatusSource = read(
     "domains/home/home_status_aggregation.js",
   );
+  const homeMembershipSource = read(
+    "domains/home/home_membership.js",
+  );
   const presenceSessionSource = read(
     "domains/presence/presence_session.js",
   );
@@ -104,6 +107,11 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.doesNotMatch(homeStatusSource, /function getSafeHome/);
   assert.doesNotMatch(homeStatusSource, /function buildSafeHome/);
   assert.match(homeStatusSource, /createHomeStatusAggregation/);
+  assert.match(homeMembershipSource, /createHomeMembershipDomain/);
+  assert.doesNotMatch(
+    homeMembershipSource,
+    /SAFEHOME|SafeHome|safehome/,
+  );
   assert.doesNotMatch(presenceSessionSource, /function getSafeHome/);
   assert.doesNotMatch(presenceSessionSource, /function buildSafeHome/);
   assert.doesNotMatch(mqttIngestionSource, /function getSafeHome/);

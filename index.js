@@ -41,6 +41,9 @@ const {
   createHomeStatusAggregation,
 } = require("./domains/home/home_status_aggregation");
 const {
+  createHomeMembershipDomain,
+} = require("./domains/home/home_membership");
+const {
   createSystemHealthDomain,
 } = require("./domains/system_health/system_health");
 const {
@@ -6703,556 +6706,8 @@ function stopScheduledAlarmCheckMonitor() {
   scheduledAlarmCheckInterval = null;
 }
 
-const transferOwnerAcceptInProgress = new Set();
-
-function normalizeHomeOrder(rawOrder) {
-  if (Array.isArray(rawOrder)) {
-    return rawOrder
-      .filter((value) => value != null)
-      .map((value) => String(value))
-      .filter((value) => value.length > 0);
-  }
-
-  if (
-    rawOrder &&
-    typeof rawOrder === "object"
-  ) {
-    return Object.keys(rawOrder)
-      .sort((a, b) => Number(a) - Number(b))
-      .map((key) => rawOrder[key])
-      .filter((value) => value != null)
-      .map((value) => String(value))
-      .filter((value) => value.length > 0);
-  }
-
-  return [];
-}
-
-async function handleTransferOwnerAcceptRequest(snap) {
-    const req = snap.val();
-    const requestId = snap.key;
-
-    async function finishRequest(
-      status,
-      errorMessage = "",
-    ) {
-      try {
-        const result = {
-          status,
-          processedAt: Date.now(),
-        };
-
-        if (errorMessage) {
-          result.error = errorMessage;
-        }
-
-        await snap.ref.update(result);
-
-        setTimeout(async () => {
-          try {
-            await snap.ref.remove();
-          } catch (_) {}
-        }, 30000);
-      } catch (_) {}
-    }
-
-    try {
-      if (!req || !requestId) {
-        return;
-      }
-
-      if (
-        transferOwnerAcceptInProgress.has(
-          requestId,
-        )
-      ) {
-        return;
-      }
-
-      transferOwnerAcceptInProgress.add(
-        requestId,
-      );
-
-      const requestedByUid = String(
-        req.requestedByUid || "",
-      ).trim();
-
-      const oldOwnerUid = String(
-        req.oldOwnerUid || "",
-      ).trim();
-
-      const newOwnerUid = String(
-        req.newOwnerUid || "",
-      ).trim();
-
-      const homeId = String(
-        req.homeId || "",
-      ).trim();
-
-      const requestTime = Number(req.time);
-      const now = Date.now();
-
-      const invalidRequest =
-        req.status !== "pending" ||
-        requestedByUid.length === 0 ||
-        oldOwnerUid.length === 0 ||
-        newOwnerUid.length === 0 ||
-        homeId.length === 0 ||
-        requestedByUid !== newOwnerUid ||
-        oldOwnerUid === newOwnerUid ||
-        !Number.isFinite(requestTime) ||
-        requestTime > now + 1000 ||
-        requestTime < now - 5 * 60 * 1000;
-
-      if (invalidRequest) {
-        await finishRequest(
-          "rejected",
-          "INVALID DATA",
-        );
-        return;
-      }
-
-      const transferRequestKey =
-        `transfer_${homeId}_${oldOwnerUid}`;
-
-      const [
-        oldHomeSnap,
-        targetHomeSnap,
-        transferRequestSnap,
-        sharedByHomeSnap,
-        oldShareListSnap,
-        oldOwnerDirectorySnap,
-        newOwnerAccountSnap,
-        newOwnerOrderSnap,
-      ] = await Promise.all([
-        db
-          .ref(
-            `accounts/${oldOwnerUid}/homes/${homeId}`,
-          )
-          .once("value"),
-
-        db
-          .ref(
-            `accounts/${newOwnerUid}/homes/${homeId}`,
-          )
-          .once("value"),
-
-        db
-          .ref(
-            `accounts/${newOwnerUid}/shareRequests/${transferRequestKey}`,
-          )
-          .once("value"),
-
-        db
-          .ref(`sharedByHome/${homeId}`)
-          .once("value"),
-
-        db
-          .ref(
-            `accounts/${oldOwnerUid}/shareList/${homeId}`,
-          )
-          .once("value"),
-
-        db
-          .ref(
-            `userDirectory/${oldOwnerUid}`,
-          )
-          .once("value"),
-
-        db
-          .ref(`accounts/${newOwnerUid}`)
-          .once("value"),
-
-        db
-          .ref(
-            `accounts/${newOwnerUid}/homeOrder`,
-          )
-          .once("value"),
-      ]);
-
-      if (
-        !oldHomeSnap.exists() ||
-        !newOwnerAccountSnap.exists()
-      ) {
-        await finishRequest(
-          "rejected",
-          "ACCOUNT OR HOME NOT FOUND",
-        );
-        return;
-      }
-
-      if (targetHomeSnap.exists()) {
-        await finishRequest(
-          "rejected",
-          "TARGET HOME ALREADY EXISTS",
-        );
-        return;
-      }
-
-      const transferRequest =
-        transferRequestSnap.val() || {};
-
-      const validTransferRequest =
-        transferRequest.type ===
-          "transfer_owner_request" &&
-        transferRequest.homeId === homeId &&
-        transferRequest.oldOwnerUid ===
-          oldOwnerUid &&
-        transferRequest.newOwnerUid ===
-          newOwnerUid;
-
-      if (!validTransferRequest) {
-        await finishRequest(
-          "rejected",
-          "TRANSFER REQUEST NOT FOUND",
-        );
-        return;
-      }
-
-      const homeData =
-        oldHomeSnap.val() || {};
-
-      const storedOwnerUid = String(
-        homeData._ownerUid || "",
-      ).trim();
-
-      if (storedOwnerUid !== oldOwnerUid) {
-        await finishRequest(
-          "rejected",
-          "OWNER MISMATCH",
-        );
-        return;
-      }
-
-      const migratedHome = {
-        ...homeData,
-        _ownerUid: newOwnerUid,
-        _shared: false,
-      };
-
-      const sharedByHome =
-        sharedByHomeSnap.val() || {};
-
-      const oldShareList =
-        oldShareListSnap.val() || {};
-
-      const oldOwnerDirectory =
-        oldOwnerDirectorySnap.val() || {};
-
-      const oldOwnerMemberData = {
-        role: "member",
-        email: String(
-          oldOwnerDirectory.email || "",
-        ),
-        name: String(
-          oldOwnerDirectory.name || "",
-        ),
-        photoUrl: String(
-          oldOwnerDirectory.photoUrl || "",
-        ),
-        sharedAt: Date.now(),
-      };
-
-      const oldOwnerSharedHome = {
-        ownerUid: newOwnerUid,
-        role: "member",
-      };
-
-      if (homeData.alarmPauseToday) {
-        oldOwnerSharedHome.alarmPauseToday =
-          homeData.alarmPauseToday;
-      }
-
-      const newShareList = {};
-
-      for (
-        const [memberUid, rawMember]
-        of Object.entries(sharedByHome)
-      ) {
-        if (
-          memberUid === newOwnerUid ||
-          memberUid === oldOwnerUid
-        ) {
-          continue;
-        }
-
-        const memberData =
-          rawMember &&
-          typeof rawMember === "object"
-            ? rawMember
-            : {};
-
-        const oldListData =
-          oldShareList[memberUid] &&
-          typeof oldShareList[memberUid] ===
-            "object"
-            ? oldShareList[memberUid]
-            : {};
-
-        newShareList[memberUid] = {
-          ...memberData,
-          ...oldListData,
-          role:
-            memberData.role ||
-            oldListData.role ||
-            "member",
-        };
-      }
-
-      newShareList[oldOwnerUid] = {
-        ...oldOwnerMemberData,
-      };
-
-      const newOwnerOrder =
-        normalizeHomeOrder(
-          newOwnerOrderSnap.val(),
-        );
-
-      if (!newOwnerOrder.includes(homeId)) {
-        newOwnerOrder.push(homeId);
-      }
-
-      const updates = {
-        [`accounts/${newOwnerUid}/homes/${homeId}`]:
-          migratedHome,
-
-        [`accounts/${oldOwnerUid}/homes/${homeId}`]:
-          null,
-
-        [`accounts/${newOwnerUid}/sharedHomes/${homeId}`]:
-          null,
-
-        [`accounts/${oldOwnerUid}/sharedHomes/${homeId}`]:
-          oldOwnerSharedHome,
-
-        [`sharedByHome/${homeId}/${newOwnerUid}`]:
-          null,
-
-        [`sharedByHome/${homeId}/${oldOwnerUid}`]:
-          oldOwnerMemberData,
-
-        [`accounts/${oldOwnerUid}/shareList/${homeId}`]:
-          null,
-
-        [`accounts/${newOwnerUid}/shareList/${homeId}`]:
-          newShareList,
-
-        [`accounts/${newOwnerUid}/homeOrder`]:
-          newOwnerOrder,
-
-        [`accounts/${newOwnerUid}/customRules/${homeId}`]:
-          null,
-      };
-
-      for (
-        const memberUid
-        of Object.keys(sharedByHome)
-      ) {
-        if (
-          memberUid === newOwnerUid ||
-          memberUid === oldOwnerUid
-        ) {
-          continue;
-        }
-
-        updates[
-          `accounts/${memberUid}/sharedHomes/${homeId}/ownerUid`
-        ] = newOwnerUid;
-      }
-
-      const devices =
-        homeData.devices &&
-        typeof homeData.devices === "object"
-          ? homeData.devices
-          : {};
-
-      for (
-        const deviceId
-        of Object.keys(devices)
-      ) {
-        updates[
-          `system/devices_by_ieee/${deviceId}/uid`
-        ] = newOwnerUid;
-
-        updates[
-          `system/devices_by_ieee/${deviceId}/homeId`
-        ] = homeId;
-      }
-
-      await db.ref().update(updates);
-
-      for (
-        const deviceId
-        of Object.keys(devices)
-      ) {
-        deviceMap[deviceId] = {
-          uid: newOwnerUid,
-          homeId,
-        };
-      }
-
-      const transferHomeName =
-        String(homeData.name || "").trim() || homeId;
-      const newOwnerAccount =
-        newOwnerAccountSnap.val() || {};
-      const newOwnerProfile =
-        newOwnerAccount.profile || {};
-      const newOwnerName =
-        String(
-          newOwnerProfile.name ||
-          newOwnerAccount.name ||
-          newOwnerAccount.email ||
-          "Chủ nhà mới",
-        ).trim() || "Chủ nhà mới";
-      const oldOwnerName =
-        String(
-          oldOwnerDirectory.name ||
-          oldOwnerDirectory.email ||
-          "Chủ nhà cũ",
-        ).trim() || "Chủ nhà cũ";
-      const transferMessage =
-        `${newOwnerName} đã trở thành chủ nhà của "${transferHomeName}".`;
-      const transferData = {
-        oldOwnerUid,
-        oldOwnerName,
-        newOwnerUid,
-        newOwnerName,
-        actorName: newOwnerName,
-        homeName: transferHomeName,
-      };
-
-      await Promise.all([
-        addHomeNotificationFromBackend({
-          uid: oldOwnerUid,
-          ownerUid: newOwnerUid,
-          homeId,
-          homeName: transferHomeName,
-          type: "transfer_owner_accepted",
-          category: "member",
-          severity: "success",
-          title: "Yêu cầu chuyển quyền chủ nhà",
-          message: transferMessage,
-          actorUid: newOwnerUid,
-          entityType: "home",
-          entityId: homeId,
-          data: transferData,
-        }),
-        addHomeNotificationFromBackend({
-          uid: newOwnerUid,
-          ownerUid: newOwnerUid,
-          homeId,
-          homeName: transferHomeName,
-          type: "transfer_owner_accepted",
-          category: "member",
-          severity: "success",
-          title: "Yêu cầu chuyển quyền chủ nhà",
-          message: transferMessage,
-          actorUid: newOwnerUid,
-          entityType: "home",
-          entityId: homeId,
-          data: transferData,
-        }),
-      ]);
-
-      await finishRequest("completed");
-
-      console.log(
-        "👑 TRANSFER OWNER COMPLETED:",
-        oldOwnerUid,
-        "→",
-        newOwnerUid,
-        homeId,
-      );
-    } catch (err) {
-      console.log(
-        "TRANSFER OWNER ACCEPT ERROR:",
-        requestId,
-        err.message,
-      );
-
-      try {
-        const failedOldOwnerUid = String(
-          req?.oldOwnerUid || "",
-        ).trim();
-        const failedNewOwnerUid = String(
-          req?.newOwnerUid || "",
-        ).trim();
-        const failedHomeId = String(
-          req?.homeId || "",
-        ).trim();
-
-        if (
-          failedOldOwnerUid &&
-          failedNewOwnerUid &&
-          failedHomeId
-        ) {
-          const failedHome =
-            getCachedHomeData(
-              failedOldOwnerUid,
-              failedHomeId,
-            ) || {};
-          const failedHomeName =
-            String(failedHome.name || "").trim() ||
-            failedHomeId;
-          const failureData = {
-            oldOwnerUid: failedOldOwnerUid,
-            newOwnerUid: failedNewOwnerUid,
-            homeName: failedHomeName,
-            reason: String(err.message || "UNKNOWN ERROR").slice(0, 200),
-          };
-
-          await Promise.all([
-            addHomeNotificationFromBackend({
-              uid: failedOldOwnerUid,
-              ownerUid: failedOldOwnerUid,
-              homeId: failedHomeId,
-              homeName: failedHomeName,
-              type: "transfer_owner_failed",
-              category: "member",
-              severity: "warning",
-              title: "Yêu cầu chuyển quyền chủ nhà",
-              message: `Không thể hoàn tất chuyển quyền chủ nhà "${failedHomeName}".`,
-              actorUid: failedNewOwnerUid,
-              entityType: "home",
-              entityId: failedHomeId,
-              data: failureData,
-            }),
-            addHomeNotificationFromBackend({
-              uid: failedNewOwnerUid,
-              ownerUid: failedOldOwnerUid,
-              homeId: failedHomeId,
-              homeName: failedHomeName,
-              type: "transfer_owner_failed",
-              category: "member",
-              severity: "warning",
-              title: "Yêu cầu chuyển quyền chủ nhà",
-              message: `Không thể hoàn tất chuyển quyền chủ nhà "${failedHomeName}".`,
-              actorUid: failedNewOwnerUid,
-              entityType: "home",
-              entityId: failedHomeId,
-              data: failureData,
-            }),
-          ]);
-        }
-      } catch (notificationError) {
-        console.log(
-          "TRANSFER OWNER FAILURE NOTIFICATION ERROR:",
-          notificationError.message,
-        );
-      }
-
-      await finishRequest(
-        "rejected",
-        err.message || "UNKNOWN ERROR",
-      );
-    } finally {
-      if (requestId) {
-        transferOwnerAcceptInProgress.delete(
-          requestId,
-        );
-      }
-    }
-}
+// Home membership, role authorization and ownership transfer are extracted to
+// domains/home/home_membership.js.
 
 async function handleAlarmPauseRequest(snap) {
   const req = snap.val();
@@ -7320,30 +6775,11 @@ async function handleAlarmPauseRequest(snap) {
 
     const home = homeSnap.val() || {};
 
-    let hasPermission = createdByUid === ownerUid;
-
-    if (!hasPermission) {
-      const [sharedHomeSnap, sharedMemberSnap] =
-        await Promise.all([
-          db
-            .ref(
-              `accounts/${createdByUid}/sharedHomes/${homeId}`,
-            )
-            .once("value"),
-
-          db
-            .ref(
-              `sharedByHome/${homeId}/${createdByUid}`,
-            )
-            .once("value"),
-        ]);
-
-      const sharedHome = sharedHomeSnap.val() || {};
-
-      hasPermission =
-        sharedHome.ownerUid === ownerUid &&
-        sharedMemberSnap.exists();
-    }
+    const hasPermission = await verifyHomeParticipant({
+      requesterUid: createdByUid,
+      ownerUid,
+      homeId,
+    });
 
     if (!hasPermission) {
       await reject("NO PERMISSION");
@@ -7960,11 +7396,11 @@ async function handleAlarmIncidentActionRequest(snap) {
       // Cùng event trên tài khoản này chỉ được báo lại sau khi sensor trở về
       // an toàn và hết cooldown.
       if (action === "check_home" && incident.status === "active") {
-        const isHomeParticipant =
-          requestedBy === ownerUid ||
-          Boolean(
-            sharedByHomeCache.get(homeId)?.[requestedBy],
-          );
+        const isHomeParticipant = isCachedHomeParticipant({
+          requesterUid: requestedBy,
+          ownerUid,
+          homeId,
+        });
 
         if (!isHomeParticipant) {
           await reject("NO HOME PERMISSION");
@@ -8094,11 +7530,11 @@ async function handleAlarmIncidentActionRequest(snap) {
       // của Home. Sau khi xác thực người thao tác thuộc Home, đóng đồng thời
       // mọi bản sao incident của Owner và Member để các máy không còn hiển thị
       // trạng thái khác nhau hoặc nhận lại payload cũ của cùng sự cố.
-      const isHomeParticipant =
-        requestedBy === ownerUid ||
-        Boolean(
-          sharedByHomeCache.get(homeId)?.[requestedBy],
-        );
+      const isHomeParticipant = isCachedHomeParticipant({
+        requesterUid: requestedBy,
+        ownerUid,
+        homeId,
+      });
 
       if (!isHomeParticipant) {
         await reject("NO HOME PERMISSION");
@@ -8146,6 +7582,28 @@ async function handleAlarmIncidentActionRequest(snap) {
     }
 }
 
+
+// ================= HOME MEMBERSHIP DOMAIN =================
+// Owns canonical Home roles, participant authorization and atomic ownership
+// transfer across owned/shared Home indexes, member lists and device indexes.
+const homeMembershipDomain = createHomeMembershipDomain({
+  db,
+  deviceMap,
+  getCachedAccountData,
+  getCachedHomeData,
+  getSharedMembersForHome: (homeId) => {
+    return sharedByHomeCache.get(homeId) || {};
+  },
+  addHomeNotificationFromBackend,
+  log: (...args) => console.log(...args),
+});
+
+const {
+  handleTransferOwnerAcceptRequest,
+  isCachedHomeParticipant,
+  stopHomeMembershipRuntime,
+  verifyHomeParticipant,
+} = homeMembershipDomain;
 
 // ================= FIREBASE REQUEST COORDINATOR =================
 // Owns the remaining composition-root Firebase listener lifecycle. Business
@@ -8494,6 +7952,15 @@ addBackendComponent({
     );
   },
 });
+
+if (!registerBackendFinalizer({
+  key: "home_membership_runtime",
+  handler: stopHomeMembershipRuntime,
+})) {
+  throw new Error(
+    "Duplicate backend lifecycle finalizer: home_membership_runtime",
+  );
+}
 
 if (!registerBackendFinalizer({
   key: "persist_local_runtime",
