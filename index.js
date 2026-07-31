@@ -38,6 +38,9 @@ const {
   createHomeActivityDomain,
 } = require("./domains/notifications/home_activity");
 const {
+  createHomeStatusAggregation,
+} = require("./domains/home/home_status_aggregation");
+const {
   createSystemHealthDomain,
 } = require("./domains/system_health/system_health");
 const {
@@ -687,9 +690,16 @@ const {
   log: (...args) => console.log(...args),
 });
 
-// ================= SYSTEM HEALTH DOMAIN =================
-// Pin yếu, cảm biến/Hub/MQTT mất kết nối chỉ là system_warning.
-// Nhóm này không bao giờ tạo Alarm incident, fullscreen hoặc bật còi.
+// ================= HOME STATUS AGGREGATION =================
+// Owns pure Home safety/system-warning evaluation and the normalized
+// Presence/Auto Away counters consumed by Reminder and StatusPanel data.
+const homeStatusAggregation = createHomeStatusAggregation({
+  normalizeLockState,
+  isActiveSignal,
+  isSecurityDeviceType,
+  isEmergencyDeviceType,
+});
+
 const {
   getHeartbeatLimitMs,
   parseSystemHealthTimestamp,
@@ -697,16 +707,19 @@ const {
   isSystemHealthExplicitlyOnline,
   evaluateHomeSystemHealth,
   getHomeNotificationSafety,
+} = homeStatusAggregation;
+
+// ================= SYSTEM HEALTH DOMAIN =================
+// Persists system-warning transitions and emits recovery notifications.
+// This monitor never creates Alarm incidents, fullscreen or physical siren.
+const {
   startSystemHealthMonitor,
 } = createSystemHealthDomain({
   db,
   getFirebaseConnected: () => firebaseConnected,
   getAccountsEntries: () => accountCache.entries(),
   addHomeNotificationToHomeRecipients,
-  normalizeLockState,
-  isActiveSignal,
-  isSecurityDeviceType,
-  isEmergencyDeviceType,
+  homeStatusAggregation,
   log: (...args) => console.log(...args),
 });
 

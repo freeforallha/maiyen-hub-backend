@@ -41,6 +41,7 @@ FILES=(
   "domains/hub/hub_identity.js"
   "domains/hub/hub_heartbeat.js"
   "domains/shared/ordered_list_cleanup.js"
+  "domains/home/home_status_aggregation.js"
   "domains/notifications/fcm_delivery.js"
   "domains/notifications/scheduled_reminder.js"
   "domains/notifications/home_activity.js"

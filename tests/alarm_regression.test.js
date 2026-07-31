@@ -20,6 +20,9 @@ const sensorAlarmEngine = require(
 const {
   buildNewDeviceRecord,
 } = require("../domains/devices/device_management");
+const {
+  buildPresenceSummary,
+} = require("../domains/home/home_status_aggregation");
 
 const INDEX_PATH = path.resolve(__dirname, "..", "index.js");
 const AUTO_AWAY_PATH = path.resolve(
@@ -2144,15 +2147,7 @@ test("Auto Away chỉ dùng participantUids cho quyết định bật và tắt 
 });
 
 test("Presence Summary tách riêng trạng thái nhóm thành viên Auto Away được chọn", () => {
-  const context = {};
-
-  vm.runInNewContext(
-    `${extractAutoAwayFunctionSource("buildPresenceSummary")}\n` +
-      "this.buildSummary = buildPresenceSummary;",
-    context,
-  );
-
-  const summary = context.buildSummary({
+  const summary = buildPresenceSummary({
     totalMemberCount: 5,
     participantCount: 3,
     participantInsideCount: 1,

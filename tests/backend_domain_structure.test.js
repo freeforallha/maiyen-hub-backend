@@ -12,12 +12,14 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, health, Presence, Auto Away, Security Mode, runtime, device, notification and Alarm domains", () => {
+test("composition root uses extracted Hub, Home Status, health, Presence, Auto Away, Security Mode, runtime, device, notification and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
   assert.match(source, /createHubHeartbeat/);
   assert.match(source, /createOrderedListCleanup/);
+  assert.match(source, /createHomeStatusAggregation/);
+  assert.match(source, /domains\/home\/home_status_aggregation/);
   assert.match(source, /createFcmDeliveryDomain/);
   assert.match(source, /domains\/notifications\/fcm_delivery/);
   assert.match(source, /createScheduledReminderDomain/);
@@ -170,9 +172,46 @@ test("composition root uses extracted Hub, health, Presence, Auto Away, Security
     /function prepareSessionContext\(/,
   );
 
+  const homeStatusSource = fs.readFileSync(
+    path.join(
+      ROOT,
+      "domains",
+      "home",
+      "home_status_aggregation.js",
+    ),
+    "utf8",
+  );
+  const systemHealthSource = fs.readFileSync(
+    path.join(ROOT, "domains", "system_health", "system_health.js"),
+    "utf8",
+  );
+
+  assert.match(
+    homeStatusSource,
+    /function createHomeStatusAggregation\(/,
+  );
+  assert.match(homeStatusSource, /function buildPresenceSummary\(/);
+  assert.match(homeStatusSource, /function buildAutoAwayRuntime\(/);
+  assert.doesNotMatch(
+    systemHealthSource,
+    /function evaluateHomeSystemHealth\(/,
+  );
+  assert.doesNotMatch(
+    autoAwaySource,
+    /function buildPresenceSummary\(/,
+  );
+  assert.doesNotMatch(
+    autoAwaySource,
+    /function runtimeSignature\(/,
+  );
+
   const deploySource = fs.readFileSync(
     path.join(ROOT, "scripts", "deploy_backend_production.sh"),
     "utf8",
+  );
+  assert.match(
+    deploySource,
+    /domains\/home\/home_status_aggregation\.js/,
   );
   assert.match(
     deploySource,
