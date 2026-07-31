@@ -12,7 +12,7 @@ const { createOrderedListCleanup } = require(
   "../domains/shared/ordered_list_cleanup",
 );
 
-test("composition root uses extracted Hub, Home Status, health, Presence, Auto Away, Security Mode, runtime, device, notification and Alarm domains", () => {
+test("composition root uses extracted Hub, Home Status, health, Presence, Auto Away, Security Mode, Firebase coordinator, runtime, device, notification and Alarm domains", () => {
   const source = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 
   assert.match(source, /createHubIdentity/);
@@ -38,6 +38,13 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
     /offlineAlarmDemandMap,\s*clearOfflineAlarmDemand,/,
   );
   assert.match(source, /createLocalRuntimeDomain/);
+  assert.match(source, /createFirebaseRequestCoordinator/);
+  assert.match(
+    source,
+    /domains\/runtime\/firebase_request_coordinator/,
+  );
+  assert.match(source, /startFirebaseRequestCoordinator\(\)/);
+  assert.match(source, /stopFirebaseRequestCoordinator\(\)/);
   assert.match(source, /domains\/devices\/device_profile/);
   assert.match(source, /createMqttDeviceIngestionDomain/);
   assert.match(source, /domains\/devices\/mqtt_device_ingestion/);
@@ -96,6 +103,26 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.doesNotMatch(source, /function setPermitJoin\(/);
   assert.doesNotMatch(source, /db\.ref\("pair_requests"\)\.on/);
   assert.doesNotMatch(source, /db\.ref\("device_delete_requests"\)\.on/);
+  assert.doesNotMatch(
+    source,
+    /db\.ref\("transfer_owner_accept_requests"\)\.on/,
+  );
+  assert.doesNotMatch(
+    source,
+    /db\.ref\("alarm_pause_requests"\)\.on/,
+  );
+  assert.doesNotMatch(
+    source,
+    /db\.ref\("home_siren_action_requests"\)\.on/,
+  );
+  assert.doesNotMatch(
+    source,
+    /db\.ref\("alarm_incident_action_requests"\)\.on/,
+  );
+  assert.doesNotMatch(
+    source,
+    /db\.ref\("accounts"\)\.on\("child_changed"/,
+  );
   assert.doesNotMatch(source, /📡 FIREBASE DEVICE UPDATE:/);
   assert.doesNotMatch(source, /function isActiveSignal\(/);
   assert.doesNotMatch(source, /function normalizeAlarmDays\(/);
@@ -205,6 +232,26 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
     /function runtimeSignature\(/,
   );
 
+  const coordinatorSource = fs.readFileSync(
+    path.join(
+      ROOT,
+      "domains",
+      "runtime",
+      "firebase_request_coordinator.js",
+    ),
+    "utf8",
+  );
+
+  assert.match(
+    coordinatorSource,
+    /function createFirebaseRequestCoordinator\(/,
+  );
+  assert.match(coordinatorSource, /function registerListener\(/);
+  assert.match(
+    coordinatorSource,
+    /function stopFirebaseRequestCoordinator\(/,
+  );
+
   const deploySource = fs.readFileSync(
     path.join(ROOT, "scripts", "deploy_backend_production.sh"),
     "utf8",
@@ -244,6 +291,10 @@ test("composition root uses extracted Hub, Home Status, health, Presence, Auto A
   assert.match(
     deploySource,
     /domains\/runtime\/local_runtime\.js/,
+  );
+  assert.match(
+    deploySource,
+    /domains\/runtime\/firebase_request_coordinator\.js/,
   );
   assert.match(
     deploySource,

@@ -77,6 +77,9 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   const securityModeSource = read(
     "domains/security/security_mode_orchestration.js",
   );
+  const firebaseCoordinatorSource = read(
+    "domains/runtime/firebase_request_coordinator.js",
+  );
 
   assert.match(lifecycleSource, /function getMaiYenAndroidAlarmCollapseKey/);
   assert.match(lifecycleSource, /function getMaiYenAlarmDeliveryId/);
@@ -109,6 +112,14 @@ test("alarm helper symbols and ready log use MaiYen names", () => {
   assert.match(
     securityModeSource,
     /createSecurityModeOrchestrationDomain/,
+  );
+  assert.match(
+    firebaseCoordinatorSource,
+    /createFirebaseRequestCoordinator/,
+  );
+  assert.doesNotMatch(
+    firebaseCoordinatorSource,
+    /SAFEHOME|SafeHome|safehome/,
   );
   assert.match(
     presenceSessionSource,

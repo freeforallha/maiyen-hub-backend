@@ -56,6 +56,9 @@ const {
   createLocalRuntimeDomain,
 } = require("./domains/runtime/local_runtime");
 const {
+  createFirebaseRequestCoordinator,
+} = require("./domains/runtime/firebase_request_coordinator");
+const {
   isActiveSignal,
   isVibrationAction,
   isGlassBreakAction,
@@ -136,6 +139,7 @@ const VIBRATION_ACTIVE_WINDOW_MS = 15 * 1000;
 
 const userDirectoryCache = {};
 let chatUnreadMigrationPromise = null;
+let firebaseRequestCoordinator = null;
 
 // ================= LIMITED TIMELINES =================
 // Giới hạn lưu thực tế. UI vẫn chỉ tải số lượng cần hiển thị.
@@ -1044,6 +1048,7 @@ async function startBackendDataCache() {
         previousAccount,
         account,
       );
+      void handleAlarmPauseAccountChanged(snap);
     }
 
     void syncUserDirectoryEntry(uid, account).catch((error) => {
@@ -1100,13 +1105,48 @@ async function startBackendDataCache() {
     }
   };
 
-  accountsRef.on("child_added", upsertAccount);
-  accountsRef.on("child_changed", upsertAccount);
-  accountsRef.on("child_removed", removeAccount);
+  const cacheListeners = [
+    {
+      key: "cache:accounts:child_added",
+      path: "accounts",
+      event: "child_added",
+      handler: upsertAccount,
+    },
+    {
+      key: "cache:accounts:child_changed",
+      path: "accounts",
+      event: "child_changed",
+      handler: upsertAccount,
+    },
+    {
+      key: "cache:accounts:child_removed",
+      path: "accounts",
+      event: "child_removed",
+      handler: removeAccount,
+    },
+    {
+      key: "cache:shared_by_home:child_added",
+      path: "sharedByHome",
+      event: "child_added",
+      handler: upsertSharedHome,
+    },
+    {
+      key: "cache:shared_by_home:child_changed",
+      path: "sharedByHome",
+      event: "child_changed",
+      handler: upsertSharedHome,
+    },
+    {
+      key: "cache:shared_by_home:child_removed",
+      path: "sharedByHome",
+      event: "child_removed",
+      handler: removeSharedHome,
+    },
+  ];
 
-  sharedRef.on("child_added", upsertSharedHome);
-  sharedRef.on("child_changed", upsertSharedHome);
-  sharedRef.on("child_removed", removeSharedHome);
+  for (const listener of cacheListeners) {
+    firebaseRequestCoordinator.registerListener(listener);
+  }
 
   // Bootstrap đúng một lần để các tác vụ khởi động có dữ liệu đầy đủ.
   const [accountsSnap, sharedSnap, deviceIndexSnap] =
@@ -6746,9 +6786,7 @@ function normalizeHomeOrder(rawOrder) {
   return [];
 }
 
-db.ref("transfer_owner_accept_requests").on(
-  "child_added",
-  async (snap) => {
+async function handleTransferOwnerAcceptRequest(snap) {
     const req = snap.val();
     const requestId = snap.key;
 
@@ -7272,9 +7310,9 @@ db.ref("transfer_owner_accept_requests").on(
         );
       }
     }
-  },
-);
-db.ref("alarm_pause_requests").on("child_added", async (snap) => {
+}
+
+async function handleAlarmPauseRequest(snap) {
   const req = snap.val();
   const requestId = snap.key;
 
@@ -7540,8 +7578,9 @@ db.ref("alarm_pause_requests").on("child_added", async (snap) => {
       await snap.ref.remove();
     } catch (_) { }
   }
-});
-db.ref("accounts").on("child_changed", async (snap) => {
+}
+
+async function handleAlarmPauseAccountChanged(snap) {
   try {
     const ownerUid = snap.key;
     const user = snap.val() || {};
@@ -7638,7 +7677,8 @@ Nên trong khoảng thời gian này:
       err.message,
     );
   }
-});
+}
+
 
 // ================= HOME SIREN ACTION REQUEST =================
 // Nút trong DeviceList chỉ tắt còi vật lý của Home. Incident, fullscreen và
@@ -7663,9 +7703,7 @@ async function finishHomeSirenActionRequest(
   scheduleHomeSirenActionRequestCleanup(requestRef);
 }
 
-db.ref("home_siren_action_requests").on(
-  "child_added",
-  async (snap) => {
+async function handleHomeSirenActionRequest(snap) {
     const req = snap.val();
     const requestId = snap.key;
     let ownsRequest = false;
@@ -7874,13 +7912,11 @@ db.ref("home_siren_action_requests").on(
         homeSirenActionInProgress.delete(requestId);
       }
     }
-  },
-);
+}
+
 
 // ================= ALARM INCIDENT ACTION REQUEST =================
-db.ref("alarm_incident_action_requests").on(
-  "child_added",
-  async (snap) => {
+async function handleAlarmIncidentActionRequest(snap) {
     const req = snap.val();
     const requestId = snap.key;
 
@@ -8166,8 +8202,56 @@ db.ref("alarm_incident_action_requests").on(
         alarmIncidentActionInProgress.delete(requestId);
       }
     }
+}
+
+
+// ================= FIREBASE REQUEST COORDINATOR =================
+// Owns the remaining composition-root Firebase listener lifecycle. Business
+// handlers stay explicit here, while registration, duplicate prevention,
+// async error isolation and shutdown detachment are centralized.
+firebaseRequestCoordinator = createFirebaseRequestCoordinator({
+  db,
+  log: (...args) => console.log(...args),
+});
+
+const {
+  registerListener: registerFirebaseListener,
+  startFirebaseRequestCoordinator,
+  stopFirebaseRequestCoordinator,
+} = firebaseRequestCoordinator;
+
+const firebaseRequestListeners = [
+  {
+    key: "request:transfer_owner_accept",
+    path: "transfer_owner_accept_requests",
+    event: "child_added",
+    handler: handleTransferOwnerAcceptRequest,
   },
-);
+  {
+    key: "request:alarm_pause",
+    path: "alarm_pause_requests",
+    event: "child_added",
+    handler: handleAlarmPauseRequest,
+  },
+  {
+    key: "request:home_siren_action",
+    path: "home_siren_action_requests",
+    event: "child_added",
+    handler: handleHomeSirenActionRequest,
+  },
+  {
+    key: "request:alarm_incident_action",
+    path: "alarm_incident_action_requests",
+    event: "child_added",
+    handler: handleAlarmIncidentActionRequest,
+  },
+];
+
+for (const listener of firebaseRequestListeners) {
+  registerFirebaseListener(listener);
+}
+
+startFirebaseRequestCoordinator();
 
 // ================= MQTT CONNECT =================
 client.on("connect", () => {
@@ -8275,6 +8359,7 @@ init().catch((error) => {
 
 process.once("SIGTERM", async () => {
   hubUpdateBridge?.stop();
+  stopFirebaseRequestCoordinator();
   await stopDeviceManagement();
   stopMqttDeviceIngestion();
   stopSecurityModeOrchestration();
@@ -8286,6 +8371,7 @@ process.once("SIGTERM", async () => {
 
 process.once("SIGINT", async () => {
   hubUpdateBridge?.stop();
+  stopFirebaseRequestCoordinator();
   await stopDeviceManagement();
   stopMqttDeviceIngestion();
   stopSecurityModeOrchestration();
